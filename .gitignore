@@ -1,0 +1,48 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Node.js
+node_modules/
+dist/
+.next/
+
+# Datasets and generated artifacts
+data/
+datasets/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.zip
+*.mp4
+*.avi
+
+# ML outputs
+runs/
+checkpoints/
+outputs/
+logs/
+wandb/
+mlruns/
+
+# Local inspection scripts and reports
+df40-structure.txt
+extract-df40.ps1
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
