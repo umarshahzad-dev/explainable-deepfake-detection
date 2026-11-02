@@ -1,33 +1,20 @@
-# Milestone 1.1 — Audited inventory
+# Dataset audit
 
-This update **replaces** `src/deepfake_data/inventory.py` and `tests/test_inventory.py`. It does not overwrite the original datasets or update source files from the previous v1 project.
+## Verified observations
 
-- Registers `.gif` files as `animated_image` without decoding into frames.
-- Reports extension totals and excluded auxiliary extensions (`.npy`, `.zip`, etc.).
-- Records missing dataset roots and unsupported media.
-- Leaves unknown labels unknown; does not infer train/test membership.
-- Avoids assuming DF40 method names indicate labels.
+- The earlier `df40` configuration pointed to the parent of `extracted`: every method was reported as `extracted`, and 28 archive ZIPs were counted alongside extracted contents. The fixed configuration uses direct central dataset roots. FF++'s project-local root contains junctions, so pointing at the physical root avoids silently skipping both video trees.
+- FF++ includes original and manipulated videos in `c23`. Celeb-DF-v2 includes an official testing-video list. DF40 has 28 extracted method directories and 82 metadata JSON files. All but `whichfaceisreal` have directly named metadata; this does not prove complete coverage.
+- Inspected DF40 JSON uses collection, class, partition, sample and frame-path nesting. Some real references point into Celeb-DF-v2 and FaceForensics++, creating known provenance overlap. Source-provided real/fake labels are used only when mapping is unambiguous.
+- The prior report recorded 9,431 FF++ videos, 6,529 Celeb-DF videos, 626,505 DF40 media, 352,516 NPY files and 30 ZIPs. Those are historical results, not independent validation of the new scan. Consult the current full `report.json` for actual disk accounting; limited previews cannot settle the PNG/JPEG discrepancy.
 
-## Install
+## Remaining risks
 
-Extract the ZIP **into the project root** (`D:\University\explainable-deepfake-detection-system-v2`) and allow overwriting the two files. The ZIP has `src/`, `tests/`, and this README at top level.
+Physical media have not been comprehensively decoded, and no identity-safe independent test set has been verified. The file names and JSON group samples but do not alone prove cross-dataset independence. The experimental training protocol can include related content; strict evaluation quarantines unresolved relationships. MidJourney GIF animation and DF40 face-crop suitability require bounded image inspection with Pillow. Some JSON references refer to external release paths rather than local DF40 media; these are counted separately and are not silently classified as missing DF40 files. Metadata duplicates, conflicts, absent references and unlisted media appear in the generated report. An exact hash scan is optional and expensive.
 
-```powershell
-cd D:\University\explainable-deepfake-detection-system-v2
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m deepfake_data.inventory
-```
+## Change groups and suggested commits
 
-## Verification of known DF40 disk counts
+- Inventory and source metadata: `fix(ingestion): reconcile dataset paths and DF40 metadata`
+- Experimental and strict splits: `feat(data): add provenance-aware split protocols`
+- Bounded extraction and image inspection: `feat(ingestion): add resumable face extraction`
 
-Inspect `artifacts/inventory/report.json` and confirm its `discovered_extensions.df40` counts against the independent file audit. The independent audit reported 620259 PNG, 6000 JPG, 2000 JPEG, 247 GIF, and 352516 NPY in the extracted root; counts may differ if the project junction points at a different directory or the data changes. Non-media files are intentionally excluded.
-
-The directory listing alone does not establish correct train/test split or per-identity separation. Do not train from this manifest yet.
-
-## Git
-
-```powershell
-git add src/deepfake_data/inventory.py tests/test_inventory.py README-AUDIT.md
-git commit -m "fix(ingestion): audit dataset formats and include GIF files"
-git push origin main
-```
+The test suite exercises small synthetic fixtures; it is not a validation of the full physical dataset. See README for commands and dependency requirements.

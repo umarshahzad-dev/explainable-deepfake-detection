@@ -11,9 +11,16 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+inspection = ["Pillow>=10,<12"]
+extraction = ["opencv-python>=4.8,<5", "facenet-pytorch>=2.6,<3"]
 
 [project.scripts]
 deepfake-inventory = "deepfake_data.inventory:main"
+deepfake-split = "deepfake_data.split:main"
+deepfake-extract = "deepfake_data.extract:main"
+deepfake-inspect = "deepfake_data.inspect_media:main"
+deepfake-gif = "deepfake_data.gif_frames:main"
+deepfake-training-manifest = "deepfake_data.training_manifest:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
