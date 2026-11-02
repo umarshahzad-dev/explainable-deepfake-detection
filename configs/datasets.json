@@ -1,0 +1,9 @@
+{
+  "raw_root": "data/raw",
+  "output_dir": "artifacts/inventory",
+  "datasets": {
+    "ffpp": {"path": "ffpp", "enabled": true},
+    "celebdf": {"path": "celebdf/Celeb-DF-v2", "enabled": true},
+    "df40": {"path": "df40", "enabled": true, "partition": "unverified"}
+  }
+}

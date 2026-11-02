@@ -46,3 +46,7 @@ extract-df40.ps1
 .idea/
 .DS_Store
 Thumbs.db
+
+# Generated dataset inventories
+artifacts/
+*.egg-info/
