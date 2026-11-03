@@ -11,8 +11,8 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
-inspection = ["Pillow>=10,<12"]
-extraction = ["opencv-python>=4.8,<5", "facenet-pytorch>=2.6,<3"]
+inspection = ["Pillow>=10.2,<10.3"]
+extraction = ["opencv-python>=4.8,<4.12", "facenet-pytorch==2.6.0"]
 
 [project.scripts]
 deepfake-inventory = "deepfake_data.inventory:main"

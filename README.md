@@ -1,21 +1,10 @@
-# Explainable Deepfake Detection — dataset foundation
+# Explainable Deepfake Detection â€” dataset foundation
 
 Labels are **0 = fake** and **1 = real**. DF40 samples come from the authors' testing-data release; training on them is an experiment, not an untouched official DF40 benchmark. Inventory and splits never move or modify raw media. Generated manifests, image outputs and logs belong outside Git.
 
-## Setup
+## Inventory and splits
 
-Python 3.11 and the existing `.venv` are expected. From the project root:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-The inventory and splitter use the standard library. Optional `.[inspection]` installs Pillow for image/GIF decoding. Optional `.[extraction]` installs OpenCV and facenet-pytorch, including PyTorch and its dependencies; these can be large. MTCNN weights are supplied with facenet-pytorch. Installing packages requires network access and may select a CPU-only PyTorch build; choose and install an appropriate CUDA-enabled PyTorch build separately for GPU use. No optional package or weights are installed by these commands unless requested.
-
-## Inventory and validate
-
-Configured paths in `configs/datasets.json` point directly to the central physical dataset roots, avoiding nested junctions. Change them if moving the project. Preview first:
+Python 3.11 is required. The inventory and splitter use the standard library. Paths are configured in `configs/datasets.json` and point to the central physical dataset roots. From the project root:
 
 ```powershell
 .\.venv\Scripts\python.exe -m deepfake_data.inventory --limit-per-dataset 100
@@ -23,53 +12,93 @@ Configured paths in `configs/datasets.json` point directly to the central physic
 .\.venv\Scripts\python.exe -m deepfake_data.inventory
 ```
 
-The command writes `artifacts/inventory/manifest.csv` and `report.json`. A limited scan cannot establish totals or unmatched metadata counts. The full scan does not decode media. Original JSON files are read, not changed. For a small image/GIF decode sample after installing `.[inspection]`:
+The command writes `artifacts/inventory/manifest.csv` and `report.json`. A limited scan cannot establish totals or unmatched metadata counts; a full scan does not decode media. Original JSON files are read, not changed. Image and GIF inspection can be run with `python -m deepfake_data.inspect_media MANIFEST --limit 20 --output artifacts/inspection.json`; a selected GIF can be converted with `python -m deepfake_data.gif_frames GIF --output artifacts/gif_frames --max-frames 10`. These commands require Pillow.
+
+Generate relationship candidates for both holdouts, then review the CSV evidence. An unknown or suspected relationship is not proof of independence; set `reviewed_independent` only where documented evidence supports it. The review requires an evidence field.
 
 ```powershell
-.\.venv\Scripts\python.exe -m deepfake_data.inspect_media artifacts/inventory/manifest.csv --limit 20 --output artifacts/inspection.json
+.\.venv\Scripts\python.exe -m deepfake_data.relationships artifacts/inventory/manifest.csv --holdout celebdf --output artifacts/reviews/celebdf.csv
+.\.venv\Scripts\python.exe -m deepfake_data.relationships artifacts/inventory/manifest.csv --holdout ffpp --output artifacts/reviews/ffpp.csv
+.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol experimental --seed 42 --output artifacts/splits/within.csv
+.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol experimental --holdout celebdf --reviews artifacts/reviews/celebdf.csv --output artifacts/splits/holdout-celebdf.csv
+.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol experimental --holdout ffpp --reviews artifacts/reviews/ffpp.csv --output artifacts/splits/holdout-ffpp.csv
 ```
 
-This checks the first frame, dimensions and GIF frame count; it does not establish that every file or frame is valid. GIFs remain individual inventory records; do not send GIF files directly to a still-image training loader. To convert a selected GIF without re-cropping faces:
+Each split report includes class coverage and group/available-hash overlap checks. `--hash` hashes each file and can take a long time. Both classes in train and test are necessary, not sufficient, for a meaningful evaluation. The experimental within-dataset split is training-only because unreviewed training content could overlap evaluation. FF++ YouTube source groups follow the documented target/source filenames; DeepFakeDetection, Celeb-DF identities and cross-dataset relationships require further evidence. Identity-level safety is not established.
+
+## Bounded face extraction and visual inspection
+
+Use the existing extraction environment; no new PyTorch download or package installation is needed. Set the project source path for the current PowerShell session:
 
 ```powershell
-.\.venv\Scripts\python.exe -m deepfake_data.gif_frames "D:\path\example.gif" --output artifacts/gif_frames --max-frames 10
+$py = "D:\University\explainable-deepfake-detection-system\venv\Scripts\python.exe"
+$env:PYTHONPATH = "$PWD\src"
+& $py -c "import torch, cv2; from facenet_pytorch import MTCNN; print(torch.__version__, torch.cuda.is_available(), cv2.__version__)"
+# Run pytest from the project venv without installing packages into the extraction environment:
+& $py -c "import sys; sys.path.insert(0,'src'); sys.path.append(r'D:\University\explainable-deepfake-detection-system-v2\.venv\Lib\site-packages'); import pytest; raise SystemExit(pytest.main(['-q']))"
 ```
 
-## Splits and limitations
+**Run this inspection first.** It uses four explicitly selected files, so a full inventory is not required. The marked difficult video had a blurred candidate in a previous smoke test; add other known difficult videos with `--difficult-video` or provide a manifest with `--manifest` to select across dataset/label buckets. Inspect `contact_sheet.jpg`, individual originals/crops and `quality_report.json` before a larger run.
 
 ```powershell
-# Known-label sample groups can be used for experimental training only:
-.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol experimental --seed 42 --output artifacts/splits/experimental.csv
-# Strict within-dataset and separate held-out-dataset protocols:
-.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --output artifacts/splits/strict.csv
-.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --holdout celebdf --output artifacts/splits/holdout-celebdf.csv
-.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --holdout ffpp --output artifacts/splits/holdout-ffpp.csv
+& $py -m deepfake_data.quality `
+  --difficult-video "D:\University\datasets\deepfake\celebdf\Celeb-DF-v2\Celeb-synthesis\id0_id16_0000.mp4" `
+  --video "D:\University\datasets\deepfake\celebdf\Celeb-DF-v2\Celeb-real\id0_0000.mp4" `
+  --video "D:\University\datasets\deepfake\ffpp\manipulated_sequences\Deepfakes\c23\videos\000_003.mp4" `
+  --video "D:\University\datasets\deepfake\ffpp\original_sequences\youtube\c23\videos\000.mp4" `
+  --output artifacts/quality-review --max-videos 4 --max-frames 2 --candidates-per-segment 2 --device cuda
 ```
 
-Reports accompany each CSV. `--ratios 0.7 0.15 0.15` and `--seed` are configurable. `--hash` computes SHA-256 from every listed media file, potentially taking a long time; existing hashes are checked for cross-partition collisions. Missing hashes are not evidence of independence.
+The defaults use a square MTCNN-box crop, 1.5Ã— margin, 299Ã—299 output, confidence â‰¥0.95, source face â‰¥80Ã—80, sharpness â‰¥30, padding â‰¤35%, up to 20 temporal segments and three candidates per segment. Each segment selects at most one eligible frame using confidence, size, sharpness and padding. These thresholds and the ranking are engineering defaults, not validated optima. The deterministic face strategy selects the largest detection by default; `--face-strategy highest_confidence` and optional `--crop-mode aligned` are available. No identity tracking is performed, so the selected person can change in multi-face videos.
 
-The inventory marks video or metadata sample groups `sample_verified`: this proves frames in the same recorded sample belong together, not that other samples or datasets are unrelated. Suspected and unknown relationships are **training-only** in the experimental protocol, and quarantined in strict evaluation. Independent test partitions therefore remain empty until source relationships are reviewed and encoded as `group_id` and `group_status=verified`. For held-out rotations, training records additionally need a reviewed `verified_independent_of` value (`celebdf`, `ffpp`, or `celebdf|ffpp`). Assign one common group ID to all verified related records; do not use the same ID for unrelated samples. These fields are evidence supplied by the researcher, not an automatic identity-verification system. There is no demonstrated identity-safe or independent physical test set yet.
-
-## Video extraction
-
-After explicitly installing `.[extraction]`, start with one selected video. Outputs must be outside raw datasets:
+After visual review and explicit approval, the following **bounded batch** processes at most 200 training videos and records a console log. The current `artifacts/splits/within.csv` may be only a preview: replace it with the reviewed, full split manifest intended for the experiment. Check free disk space before running and use a separate output directory from inspection.
 
 ```powershell
-.\.venv\Scripts\python.exe -m deepfake_data.extract --manifest artifacts/splits/experimental.csv --output artifacts/faces --max-videos 1 --max-frames 5 --device cpu
+Get-PSDrive D | Select-Object Free
+New-Item -ItemType Directory -Force artifacts/logs | Out-Null
+& $py -m deepfake_data.extract --manifest artifacts/splits/within.csv --output artifacts/faces-xception `
+  --partition train --max-videos 200 --max-frames 20 --candidates-per-segment 3 --device cuda 2>&1 |
+  Tee-Object -FilePath artifacts/logs/extraction.log -Append
 ```
 
-`--device cuda` requires a compatible CUDA PyTorch installation. Frames are uniformly spaced, the largest detected face above threshold is aligned using five landmarks, and visually similar consecutive selected crops are skipped. Per-video `complete.json` records original video path and frame indices, failures, settings and output names. Completed videos are skipped on rerun; interrupted videos restart using the same configuration. Outputs are never intended to replace source media. DF40 still images are reused without MTCNN; review their size and quality before training.
+Repeat the exact command to resume. Per-video checkpoints record selected frames, rejected candidates, read errors, zero yield, source provenance, parameters and detector runtime. Changed settings or incompatible older crops are rejected; use a new output directory. Crops are written via temporary files and recorded only after completion. `--partition val` or `--partition test` selects those videos when a verified split exists. The run is sequential and bounded but its duration and storage use depend on the media and GPU.
 
-After reviewing the smoke output, disk capacity, split report and processing costs, an explicitly authorized full pass can use:
+After extraction, combine crops with eligible still images and previously converted GIF frames:
 
 ```powershell
-.\.venv\Scripts\python.exe -m deepfake_data.extract --manifest artifacts/splits/experimental.csv --output artifacts/faces --all-videos --max-frames 20 --device cuda
+& $py -m deepfake_data.training_manifest artifacts/splits/within.csv --faces artifacts/faces-xception --gif-frames artifacts/gif_frames --output artifacts/training/images.csv
 ```
 
-This command processes videos assigned to `train`. Combine completed crops with existing DF40 still images into an input manifest:
+The manifest builder reports legacy or incompatible video crop configurations instead of silently mixing them. Review that report, source relationships, split coverage, class balance and the crops before using an experiment. These outputs do not establish independent evaluation or training readiness.
+
+## Full reconciliation and readiness gate
+
+A full scan is path-only, takes time and may use substantial disk-backed temporary storage. It does not decode all media. Preserve the generated report with its matching manifest. Finalization records original-partition conflicts, dimension counts and the manifest SHA-256. The detailed reconciliation command writes all local metadata issues and unmatched JSON records as CSVs.
 
 ```powershell
-.\.venv\Scripts\python.exe -m deepfake_data.training_manifest artifacts/splits/experimental.csv --faces artifacts/faces --output artifacts/training/images.csv
+.\.venv\Scripts\python.exe -m deepfake_data.inventory
+.\.venv\Scripts\python.exe -m deepfake_data.finalize_inventory --manifest artifacts/inventory/manifest.csv --report artifacts/inventory/report.json
+.\.venv\Scripts\python.exe -m deepfake_data.reconcile_details --manifest artifacts/inventory/manifest.csv --output artifacts/reconciliation
+.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol strict --seed 42 --output artifacts/splits/within-full.csv
+.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol strict --holdout celebdf --output artifacts/splits/holdout-celebdf-full.csv
+.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol strict --holdout ffpp --output artifacts/splits/holdout-ffpp-full.csv
+.\.venv\Scripts\python.exe -m deepfake_data.relationships artifacts/inventory/manifest.csv --holdout celebdf --output artifacts/reviews/celebdf-full.csv
+.\.venv\Scripts\python.exe -m deepfake_data.relationships artifacts/inventory/manifest.csv --holdout ffpp --output artifacts/reviews/ffpp-full.csv
 ```
 
-The output retains labels, partitions, source paths and frame indices. The accompanying report lists missing video extractions and GIFs requiring conversion. It is an input manifest; image quality and training transforms still require validation. No Xception training implementation or full-dataset integrity certification is included.
+Review relationship queues before passing any review file to `--reviews`; evidence is required. Regenerate a protocol after review. The full scan currently records DF40 original-partition conflicts, not a verified DF40 test partition.
+
+Run the gate using the existing extraction environment (set `$py` and `$env:PYTHONPATH` as above). It emits JSON and Markdown, verifies the inventory/split hash chain and distinguishes bounded extraction from training/evaluation readiness:
+
+```powershell
+& $py -m deepfake_data.readiness --manifest artifacts/splits/within-full.csv `
+  --split-report artifacts/splits/within-full.report.json --inventory-report artifacts/inventory/report.json `
+  --quality-dir artifacts/quality-review-verified --df40-samples artifacts/readiness/df40-samples.json `
+  --output-dir artifacts/faces-xception --batch-videos 200 --report artifacts/readiness/within-full.json
+```
+
+A PASS for extraction is limited to the declared batch and evidence; it does not authorize a run or establish independent evaluation. A 200-video FF++ training batch, only after explicit approval, uses `artifacts/splits/within-full.csv` in the extraction command above. Repeat that exact command to resume. The minimum free-space threshold and uncompressed-size allowance are estimates; monitor disk usage and stop if needed.
+
+## Combined three-dataset experiment
+
+The current allocation is a blocked review draft, not an approved split. See [COMBINED-PIPELINE.md](COMBINED-PIPELINE.md) for source-link evidence, proposed quotas, bounded checks and the conditional future processing workflow.

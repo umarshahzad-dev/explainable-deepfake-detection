@@ -4,13 +4,14 @@ import argparse
 import csv
 import json
 import os
+import sqlite3
 from collections import Counter, defaultdict
 from pathlib import Path
 
 VIDEO_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 MEDIA_EXT = VIDEO_EXT | IMAGE_EXT | {".gif"}
-FIELDS = ["dataset", "release", "method", "source_domain", "relative_path", "absolute_path", "media_type", "label", "original_json_label", "original_partition", "project_partition", "sample_id", "group_id", "group_status", "relationship_status", "validation_status", "metadata_sources", "sha256"]
+FIELDS = ["dataset", "release", "method", "source_domain", "relative_path", "absolute_path", "media_type", "label", "original_json_label", "original_partition", "project_partition", "sample_id", "group_id", "group_status", "relationship_status", "validation_status", "metadata_sources", "sha256", "metadata_status"]
 
 
 def iter_all_files(root: Path):
@@ -34,7 +35,10 @@ def identify(dataset: str, relative: Path):
     if dataset == "celebdf" and len(parts) >= 2 and low[0] in {"celeb-real", "youtube-real", "celeb-synthesis"}:
         return ("celeb-synthesis" if low[0] == "celeb-synthesis" else "original", parts[0], 0 if low[0] == "celeb-synthesis" else 1, None)
     if dataset == "df40" and len(parts) >= 2:
-        return parts[0], next((x for x in low if x in {"cdf", "ff"}), "unknown"), None, None
+        domain = next((x for x in low if x in {"cdf", "ff"}), "unknown")
+        if domain == "unknown" and any("celeb-real" in x or "celeb-df" in x for x in low): domain = "cdf"
+        if domain == "unknown" and any("ff++" in x or "faceforensics" in x for x in low): domain = "ff"
+        return parts[0], domain, None, None
     return None
 
 
@@ -71,10 +75,48 @@ def canonical_df40(path: str):
 
 def disk_key(relative: Path):
     parts = list(relative.parts)
+    lowered = [p.casefold() for p in parts]
+    # Some archives contain an embedded original absolute-path tree.
+    for index in range(1, len(parts) - 1):
+        if lowered[index] == "df40" and lowered[index + 1] == lowered[0] and "deepfakes_detection_datasets" in lowered[:index]:
+            parts = parts[index + 1:]
+            break
     if len(parts) > 1 and parts[0].casefold() == parts[1].casefold():
         parts.pop(1)
     return "/".join(parts).casefold()
 
+
+def ffpp_source_groups(base: Path):
+    """Connected FF++ YouTube source pairs, per the official filename convention."""
+    import re
+    original = base / "original_sequences" / "youtube"
+    ids = {p.stem for p in original.rglob("*.mp4") if re.fullmatch(r"\d{3}", p.stem)} if original.exists() else set()
+    parent = {x: x for x in ids}
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    for method in ("Deepfakes", "Face2Face", "FaceSwap", "FaceShifter", "NeuralTextures"):
+        folder = base / "manipulated_sequences" / method
+        if not folder.exists(): continue
+        for p in folder.rglob("*.mp4"):
+            match = re.fullmatch(r"(\d{3})_(\d{3})", p.stem)
+            if match and all(x in ids for x in match.groups()):
+                a,b=map(find,match.groups()); parent[max(a,b)] = min(a,b)
+    return {x:find(x) for x in ids}
+
+
+def ffpp_group(relative: Path, groups):
+    import re
+    parts=relative.parts
+    if len(parts)<4: return None
+    if parts[0].casefold()=="original_sequences" and parts[1].casefold()=="youtube" and relative.stem in groups:
+        return "ffpp:youtube:"+groups[relative.stem]
+    if parts[0].casefold()=="manipulated_sequences" and parts[1].casefold() in {"deepfakes","face2face","faceswap","faceshifter","neuraltextures"}:
+        match=re.fullmatch(r"(\d{3})_(\d{3})",relative.stem)
+        if match and all(x in groups for x in match.groups()) and groups[match[1]]==groups[match[2]]:
+            return "ffpp:youtube:"+groups[match[1]]
+    return None
 
 def generate(config_path: Path, limit: int | None = None):
     if limit is not None and limit < 1:
@@ -90,17 +132,27 @@ def generate(config_path: Path, limit: int | None = None):
     metadata_root = raw / settings["df40"].get("metadata_path", "df40/metadata/dataset_json")
     methods = {p.name for p in dfroot.iterdir() if p.is_dir()} if dfroot.is_dir() else set()
     selected = metadata_files(metadata_root, methods)
-    records = defaultdict(list)
-    external = Counter()
+    # SQLite keeps the multi-million-reference index on disk instead of retaining
+    # a Python object graph for every source record. Input JSON is loaded one file at a time.
+    database = sqlite3.connect("")
+    database.execute("PRAGMA cache_size=-16384")
+    database.execute("CREATE TABLE records (key TEXT NOT NULL, item TEXT NOT NULL)")
+    external = Counter(); batch = []
     for source in selected:
         for item in metadata_records(source):
             key = canonical_df40(item["path"])
             if key is None:
                 external[item["path"].split("/")[1] if "/" in item["path"] else "unknown"] += 1
             else:
-                records[key].append(item)
+                batch.append((key, json.dumps(item, separators=(",", ":"))))
+                if len(batch) >= 10000:
+                    database.executemany("INSERT INTO records VALUES (?, ?)", batch); batch.clear()
+    if batch: database.executemany("INSERT INTO records VALUES (?, ?)", batch)
+    database.execute("CREATE INDEX records_key ON records(key)")
+    database.commit()
     counts, extensions, method_counts = Counter(), defaultdict(Counter), defaultdict(Counter)
     matched, errors, examples = set(), [], defaultdict(list)
+    ff_groups = ffpp_source_groups(raw / settings.get("ffpp", {}).get("path", "__missing_ffpp__")) if "ffpp" in settings else {}
     celeb_test = {}
     celeb_root = raw / settings.get("celebdf", {}).get("path", "")
     listing = celeb_root / "List_of_testing_videos.txt"
@@ -131,32 +183,43 @@ def generate(config_path: Path, limit: int | None = None):
                         continue
                     method, domain, label, _ = info
                     row = dict.fromkeys(FIELDS, "")
-                    row.update(dataset=dataset, release={"ffpp":"FaceForensics++", "celebdf":"Celeb-DF-v2", "df40":"DF40 official testing-data release"}.get(dataset, dataset), method=method, source_domain=domain, relative_path=relative.as_posix(), absolute_path=str(path.absolute()), media_type="video" if ext in VIDEO_EXT else "gif" if ext == ".gif" else "image", label="" if label is None else label, sample_id=relative.stem, group_status="unresolved", validation_status="not_decoded")
+                    row.update(metadata_status="path_rule" if dataset != "df40" else "unlisted", dataset=dataset, release={"ffpp":"FaceForensics++", "celebdf":"Celeb-DF-v2", "df40":"DF40 official testing-data release"}.get(dataset, dataset), method=method, source_domain=domain, relative_path=relative.as_posix(), absolute_path=str(path.absolute()), media_type="video" if ext in VIDEO_EXT else "gif" if ext == ".gif" else "image", label="" if label is None else label, sample_id=relative.stem, group_status="unresolved", validation_status="not_decoded")
                     if dataset in {"ffpp", "celebdf"}:
                         row["group_id"] = f"{dataset}:{relative.stem}"
                         row["group_status"] = "sample_verified"
                         row["relationship_status"] = "suspected"
+                    if dataset == "ffpp":
+                        group = ffpp_group(relative, ff_groups)
+                        if group:
+                            row["group_id"] = group; row["group_status"] = "verified"; row["relationship_status"] = "source_link_verified"
                     if dataset == "celebdf" and relative.as_posix().casefold() in celeb_test:
                         row["original_partition"] = "official_test"
                         if celeb_test[relative.as_posix().casefold()] != str(label):
                             row["label"] = ""; counts["label_conflicts"] += 1
                     if dataset == "df40":
-                        key = disk_key(relative); entries = records.get(key, [])
+                        key = disk_key(relative); entries = [json.loads(item) for (item,) in database.execute("SELECT item FROM records WHERE key=?", (key,))]
                         parts = relative.parts
                         alternate = base.joinpath(parts[0], *parts[2:]) if len(parts) > 1 and parts[0].casefold() == parts[1].casefold() else base.joinpath(parts[0], parts[0], *parts[1:])
-                        if alternate.is_file():
+                        canonical = base.joinpath(*key.split("/"))
+                        if alternate.is_file() or (canonical != path and canonical.is_file()):
                             entries = []
                             counts["ambiguous_disk_paths"] += 1
+                            row["metadata_status"] = "ambiguous"
                         if entries:
                             matched.add(key)
+                            row["metadata_status"] = "matched"
                             labels = {e["label"] for e in entries}; parts = {e["original_partition"] for e in entries}; samples = {e["sample_id"] for e in entries}
                             row.update(label=next(iter(labels)) if len(labels) == 1 and None not in labels else "", original_json_label="|".join(sorted({str(e["original_json_label"]) for e in entries})), original_partition="|".join(sorted(parts)), sample_id=next(iter(samples)) if len(samples) == 1 else "", metadata_sources="|".join(sorted({e["metadata_source"] for e in entries})))
-                            if len(labels) != 1 or None in labels or len(samples) != 1: counts["metadata_conflicts"] += 1
+                            if len(labels) != 1 or None in labels or len(samples) != 1:
+                                counts["metadata_conflicts"] += 1; row["metadata_status"] = "conflict"; row["label"] = ""
                             elif row["sample_id"]:
                                 row["group_id"] = f"df40:{method}:{domain}:{row['sample_id']}"
                                 row["group_status"] = "sample_verified"
                                 row["relationship_status"] = "suspected" if domain in {"cdf", "ff"} else "unknown"
-                        else:
+                            if len(parts) > 1:
+                                counts["metadata_partition_conflicts"] += 1
+                                if row["metadata_status"] == "matched": row["metadata_status"] = "partition_conflict"
+                        elif row["metadata_status"] != "ambiguous":
                             counts["df40_unlisted_media"] += 1
                             if len(examples["unlisted"]) < 20: examples["unlisted"].append(relative.as_posix())
                     writer.writerow(row); indexed += 1; counts["indexed:" + dataset] += 1
@@ -164,10 +227,18 @@ def generate(config_path: Path, limit: int | None = None):
                     method_counts[dataset][method] += 1
             except OSError as exc:
                 errors.append(f"{dataset}: {exc}")
-    unmatched = set(records) - matched
+    # Match keys are held as strings only, rather than full JSON records.
+    database.execute("CREATE TABLE matched (key TEXT PRIMARY KEY)")
+    database.executemany("INSERT OR IGNORE INTO matched VALUES (?)", ((key,) for key in matched))
+    unmatched_count = database.execute("SELECT COUNT(DISTINCT r.key) FROM records r LEFT JOIN matched m ON r.key=m.key WHERE m.key IS NULL").fetchone()[0]
+    unmatched_examples = [r[0] for r in database.execute("SELECT DISTINCT r.key FROM records r LEFT JOIN matched m ON r.key=m.key WHERE m.key IS NULL ORDER BY r.key LIMIT 20")]
+    duplicate_count = database.execute("SELECT COUNT(*)-COUNT(DISTINCT key) FROM records").fetchone()[0]
     archive = raw / settings["df40"].get("archives_path", "df40/archives")
     archive_counts = Counter(p.suffix.casefold() or "<none>" for p in iter_all_files(archive)) if archive.is_dir() else Counter()
-    report = {"counts": dict(sorted(counts.items())), "discovered_extensions": {k: dict(sorted(v.items())) for k,v in extensions.items()}, "archive_extensions": dict(archive_counts), "method_counts": {k:dict(v) for k,v in method_counts.items()}, "metadata_selected": [p.name for p in selected], "methods_without_named_metadata": sorted(m for m in methods if not metadata_files(metadata_root, {m})), "metadata_duplicate_keys": sum(len(v)-1 for v in records.values() if len(v)>1), "unmatched_metadata_paths": len(unmatched), "unmatched_metadata_examples": sorted(unmatched)[:20], "external_reference_records": dict(external), "examples": dict(examples), "errors": errors, "scan_limited": limit is not None, "limitations": ["No media decoded", "Group identities and cross-dataset independence are unverified", "Unmatched counts are incomplete for a limited scan", "Metadata outside DF40 is counted as external reference, not a missing local DF40 file"]}
+    report = {"counts": dict(sorted(counts.items())), "discovered_extensions": {k: dict(sorted(v.items())) for k,v in extensions.items()}, "archive_extensions": dict(archive_counts), "method_counts": {k:dict(v) for k,v in method_counts.items()}, "metadata_selected": [p.name for p in selected], "methods_without_named_metadata": sorted(m for m in methods if not metadata_files(metadata_root, {m})), "metadata_duplicate_keys": duplicate_count, "unmatched_metadata_paths": unmatched_count, "unmatched_metadata_examples": unmatched_examples, "external_reference_records": dict(external), "examples": dict(examples), "errors": errors, "scan_limited": limit is not None, "limitations": ["No media decoded", "Group identities and cross-dataset independence are unverified", "Unmatched counts are incomplete for a limited scan", "Metadata outside DF40 is counted as external reference, not a missing local DF40 file"]}
+    database.close()
+    from .split import file_sha256
+    report["manifest_sha256"] = file_sha256(manifest)
     (out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return manifest, report
 

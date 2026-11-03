@@ -52,6 +52,7 @@ def test_frame_sampling_and_face_selection():
     assert sampled_indices(0,3)==[]
     assert choose_face([[0,0,3,3],[0,0,5,5]],[.99,.95],["a","b"],.9)[1] == "b"
     assert choose_face([[0,0,3,3]],[.2],["a"],.9) is None
+    assert choose_face([[0,0,3,3],[0,0,5,5]],[.99,.95],["a","b"],.9,"highest_confidence")[1] == "a"
 
 
 def test_experimental_training_never_evaluates_unverified():
@@ -77,3 +78,64 @@ def test_training_manifest_includes_images_and_reports_unprocessed_video(tmp_pat
     included, skipped=build_rows(rows,tmp_path)
     assert included[0]["input_path"] == "face.png"
     assert {r["reason"] for r in skipped} == {"not_extracted","gif_requires_conversion"}
+
+
+def test_ffpp_pair_connects_original_and_manipulated(tmp_path):
+    from deepfake_data.inventory import ffpp_source_groups, ffpp_group
+    root=tmp_path/"ffpp"
+    for rel in ["original_sequences/youtube/c23/videos/001.mp4", "original_sequences/youtube/c23/videos/002.mp4", "manipulated_sequences/Deepfakes/c23/videos/001_002.mp4"]:
+        p=root/rel;p.parent.mkdir(parents=True,exist_ok=True);p.touch()
+    groups=ffpp_source_groups(root)
+    assert ffpp_group(Path("original_sequences/youtube/c23/videos/001.mp4"),groups)==ffpp_group(Path("manipulated_sequences/Deepfakes/c23/videos/001_002.mp4"),groups)
+    assert ffpp_group(Path("original_sequences/youtube/c23/videos/002.mp4"),groups)==ffpp_group(Path("manipulated_sequences/Deepfakes/c23/videos/001_002.mp4"),groups)
+
+
+def test_holdout_requires_reviewed_independence_and_quarantines_overlap():
+    base={"dataset":"df40","method":"m","label":"0","group_id":"g","group_status":"sample_verified","source_domain":"unknown"}
+    independent={**base,"overlap_status":"reviewed_independent"}
+    assert split_rows([independent],holdout="ffpp",protocol="experimental")[0]["project_partition"] == "train"
+    for status in ("unknown","verified_overlap","suspected_overlap"):
+        assert split_rows([{**base,"overlap_status":status}],holdout="ffpp",protocol="experimental")[0]["project_partition"] == "quarantine"
+    assert split_rows([{**independent,"source_domain":"ff"}],holdout="ffpp",protocol="experimental")[0]["project_partition"] == "quarantine"
+
+
+def test_review_requires_evidence(tmp_path):
+    from deepfake_data.relationships import apply_reviews
+    import pytest
+    path=tmp_path/"review.csv";path.write_text("group_id,holdout,status,evidence\ng,ffpp,reviewed_independent,\n")
+    with pytest.raises(ValueError): apply_reviews([{"group_id":"g"}],path,"ffpp")
+
+
+def test_gif_frames_join_training_manifest(tmp_path):
+    import hashlib
+    from deepfake_data.training_manifest import build_rows
+    gif=tmp_path/"a.gif";gif.touch(); root=tmp_path/"out"; key=hashlib.sha256(str(gif.resolve()).encode()).hexdigest()[:20];folder=root/key;folder.mkdir(parents=True)
+    (folder/"frame_000000000.png").touch();(folder/"complete.json").write_text(json.dumps({"config":{"source":str(gif.resolve())},"frames":[{"file":"frame_000000000.png","frame_index":0}]}))
+    row={"dataset":"df40","media_type":"gif","absolute_path":str(gif),"group_id":"gif:1","label":"0","project_partition":"test"}
+    result,skipped=build_rows([row],tmp_path,root)
+    assert not skipped and result[0]["group_id"] == "gif:1" and result[0]["project_partition"]=="test" and result[0]["source_frame_index"]==0
+
+
+def test_conflicting_df40_labels_remain_unknown(tmp_path):
+    config=tmp_path/"configs";config.mkdir();root=tmp_path/"data/raw/df40/extracted/e4s/cdf/frames/a";root.mkdir(parents=True);(root/"000.png").touch()
+    metadata=tmp_path/"data/raw/df40/metadata/dataset_json";metadata.mkdir(parents=True)
+    frame="deepfakes_detection_datasets/DF40/e4s/cdf/frames/a/000.png"
+    (metadata/"e4s_cdf.json").write_text(json.dumps({"e4s_cdf":{"x_Real":{"test":{"a":{"label":"x_Real","frames":[frame]}}},"x_Fake":{"test":{"a":{"label":"x_Fake","frames":[frame]}}}}}))
+    (config/"datasets.json").write_text(json.dumps({"raw_root":"data/raw","output_dir":"artifacts/inventory","datasets":{"df40":{"path":"df40/extracted"}}}))
+    manifest,report=generate(config/"datasets.json")
+    with manifest.open(newline="") as f: row=next(csv.DictReader(f))
+    assert row["label"]=="" and report["counts"]["metadata_conflicts"]==1
+
+
+
+def test_nested_df40_path_normalization():
+    from deepfake_data.inventory import disk_key, canonical_df40
+    nested=Path("mobileswap/mobileswap/cdf/frames/Youtu/deepfakes_detection_datasets/DF40/mobileswap/cdf/frames/clip/000.png")
+    assert disk_key(nested)==canonical_df40("deepfakes_detection_datasets/DF40/mobileswap/cdf/frames/clip/000.png")
+
+
+def test_select_validation_and_test_videos():
+    from deepfake_data.extract import select_videos
+    rows=[{"project_partition":"val","media_type":"video"},{"project_partition":"test","media_type":"video"},{"project_partition":"test","media_type":"image"}]
+    assert select_videos(rows,"val")==rows[:1]
+    assert select_videos(rows,"test")==rows[1:2]
