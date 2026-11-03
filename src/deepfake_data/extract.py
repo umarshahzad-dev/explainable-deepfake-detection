@@ -23,10 +23,11 @@ class ExtractionConfig:
     max_padding: float = 0.35
     crop_mode: str = "square"
     face_strategy: str = "largest"
+    inference_batch_size: int = 3
 
     def validate(self):
         if not all(math.isfinite(v) for v in (self.margin, self.threshold, self.min_sharpness, self.max_padding)): raise ValueError("Settings must be finite")
-        if self.max_frames < 1 or self.candidates_per_segment < 1 or self.size < 32 or self.margin < 1 or not 0 < self.threshold <= 1 or self.min_face_size < 1 or self.min_sharpness < 0 or not 0 <= self.max_padding < 1:
+        if self.max_frames < 1 or self.candidates_per_segment < 1 or not 1 <= self.inference_batch_size <= 3 or self.size < 32 or self.margin < 1 or not 0 < self.threshold <= 1 or self.min_face_size < 1 or self.min_sharpness < 0 or not 0 <= self.max_padding < 1:
             raise ValueError("Invalid extraction settings")
         if self.crop_mode not in {"square", "aligned"} or self.face_strategy not in {"largest", "highest_confidence"}:
             raise ValueError("Invalid crop or face strategy")
@@ -117,6 +118,26 @@ def best_candidate(candidates):
     return max(eligible,key=lambda item:(item[0]["score"],-item[0]["frame_index"])) if eligible else None
 
 
+def read_candidate_frames(capture, indices):
+    """Read sorted candidate indices with one seek per temporal segment."""
+    if not indices:return []
+    ordered=sorted(indices)
+    if list(indices)!=ordered:raise ValueError('Candidate indices must be sorted')
+    capture.set(1,ordered[0])  # CAP_PROP_POS_FRAMES
+    cursor=ordered[0]
+    result=[]
+    for target in ordered:
+        failed=False
+        while cursor < target:
+            if not capture.grab():failed=True;break
+            cursor+=1
+        if failed:
+            result.append((target,False,None));continue
+        ok,frame=capture.read();cursor=target+1
+        result.append((target,bool(ok and frame is not None),frame if ok else None))
+    return result
+
+
 def output_key(row):
     return hashlib.sha256((row.get("dataset", "")+":"+row.get("relative_path",row["absolute_path"])).encode()).hexdigest()[:20]
 
@@ -146,12 +167,18 @@ def extract_video(video: Path, output: Path, detector, max_frames=20, size=299, 
         signature['image_output']=str(image_dir)
         image_dir.mkdir(parents=True,exist_ok=True)
     state=output/"state.json"; completion=output/"complete.json"; progress=output/"progress.jsonl"
-    if state.exists() and json.loads(state.read_text(encoding="utf-8")) != signature: raise ValueError("Incompatible extraction checkpoint; choose a new output directory")
+    def compatible(old):
+        if old==signature:return True
+        old_parameters=old.get('parameters',{});new_parameters=signature['parameters']
+        return (config.inference_batch_size==3 and 'inference_batch_size' not in old_parameters
+                and {**old_parameters}=={k:v for k,v in new_parameters.items() if k!='inference_batch_size'}
+                and {k:v for k,v in old.items() if k!='parameters'}=={k:v for k,v in signature.items() if k!='parameters'})
+    if state.exists() and not compatible(json.loads(state.read_text(encoding="utf-8"))): raise ValueError("Incompatible extraction checkpoint; choose a new output directory")
     if completion.exists():
         try: old=json.loads(completion.read_text(encoding="utf-8"))
         except json.JSONDecodeError: old=None
         if old is not None:
-            if old.get("config") != signature: raise ValueError("Incompatible completed extraction; choose a new output directory")
+            if not compatible(old.get("config",{})): raise ValueError("Incompatible completed extraction; choose a new output directory")
             if all((output/r["file"]).is_file() and (not save_originals or (output/r["original_file"]).is_file()) for r in old["frames"]): return old
     if not state.exists(): state.write_text(json.dumps(signature,indent=2),encoding="utf-8")
     events=[]; valid_bytes=0
@@ -173,14 +200,25 @@ def extract_video(video: Path, output: Path, detector, max_frames=20, size=299, 
         if not segments: raise ValueError("Video has no readable frame count")
         for segment,indices in enumerate(segments):
             if segment in done: continue
-            candidates=[]
-            for index in indices:
-                capture.set(cv2.CAP_PROP_POS_FRAMES,index); ok,frame=capture.read()
+            candidates=[]; loaded=read_candidate_frames(capture,indices);valid=[]
+            for index,ok,frame in loaded:
                 if not ok or frame is None:
                     candidates.append(({"frame_index":index,"reason":"read_failed"},None,None)); continue
-                boxes,probs,landmarks=detector.detect(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB),landmarks=True)
+                valid.append((index,frame,cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)))
+            detected=[]
+            for start in range(0,len(valid),config.inference_batch_size):
+                batch=valid[start:start+config.inference_batch_size]
+                if len(batch)==1 or config.inference_batch_size==1:
+                    outputs=[detector.detect(item[2],landmarks=True) for item in batch]
+                else:
+                    boxes,probs,points=detector.detect([item[2] for item in batch],landmarks=True)
+                    outputs=[(boxes[i],probs[i],points[i]) for i in range(len(batch))]
+                detected.extend((item,out) for item,out in zip(batch,outputs))
+            by_index={}
+            for (index,frame,_),(boxes,probs,landmarks) in detected:
                 metadata,crop=evaluate_candidate(frame,boxes,probs,landmarks,index,config)
-                candidates.append((metadata,crop,frame if save_originals else None))
+                by_index[index]=(metadata,crop,frame if save_originals else None)
+            candidates.extend(by_index[index] for index,ok,frame in loaded if ok and frame is not None)
             winner=best_candidate(candidates); selected=None
             decisions=[]
             for metadata,crop,frame in candidates:
@@ -216,6 +254,7 @@ def select_videos(rows, partition):
 
 def add_options(p):
     p.add_argument("--max-frames",type=int,default=20);p.add_argument("--candidates-per-segment",type=int,default=3)
+    p.add_argument("--inference-batch-size",type=int,choices=(1,2,3),default=3)
     p.add_argument("--size",type=int,default=299);p.add_argument("--margin",type=float,default=1.5)
     p.add_argument("--threshold",type=float,default=.95);p.add_argument("--min-face-size",type=int,default=80)
     p.add_argument("--min-sharpness",type=float,default=15);p.add_argument("--max-padding",type=float,default=.35)

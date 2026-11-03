@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 from deepfake_data.extract import ExtractionConfig
-from deepfake_data.prepare import read_release, run
+from deepfake_data.prepare import SEEK_EQUIVALENT_LEGACY_EXTRACT_SHA256, SEEK_MIGRATION_LEGACY_PREPARE_SHA256, compatible_preparation_state, read_release, run
 from deepfake_data.split import file_sha256
 
 
@@ -51,3 +51,11 @@ def test_release_rejects_collision_and_tampering(tmp_path):
     with pytest.raises(ValueError,match='SHA-256'):read_release(manifest,'0'*64)
     with manifest.open('a',newline='',encoding='utf-8') as f:csv.DictWriter(f,fieldnames=list(rows[0])).writerow(rows[0])
     with pytest.raises(ValueError,match='colliding'):read_release(manifest,file_sha256(manifest))
+
+
+def test_seek_only_implementation_migration_preserves_compatible_state():
+    previous={'manifest_sha256':'frozen','video':{'max_frames':10},'extract_code_sha256':SEEK_EQUIVALENT_LEGACY_EXTRACT_SHA256,'prepare_code_sha256':SEEK_MIGRATION_LEGACY_PREPARE_SHA256}
+    current={**previous,'extract_code_sha256':'new-seek-only-code','prepare_code_sha256':'new-compatibility-check-code'}
+    assert compatible_preparation_state(previous,current)
+    assert not compatible_preparation_state(previous,{**current,'video':{'max_frames':9}})
+    assert not compatible_preparation_state({**previous,'extract_code_sha256':'unknown-old-code'},current)

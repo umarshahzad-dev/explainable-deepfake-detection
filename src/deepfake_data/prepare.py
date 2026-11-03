@@ -17,6 +17,8 @@ from .training_manifest import build_rows
 from .validate_prepared import validate
 
 RELEASE_SHA256='5aa0ce1f9c5f9db2b430f492ec672536dd98f63d375c17f0bb5bb644d4952aeb'
+SEEK_EQUIVALENT_LEGACY_EXTRACT_SHA256='d23879f796ebd7afe5a5d714be38954dd9002948f6717608877d1dae7251bc51'
+SEEK_MIGRATION_LEGACY_PREPARE_SHA256='ee483911b22fd47797ce53153c09a8670e76f93586d3ae53b176f1fa2878f49a'
 PARTS={'train','val','calibration','test'}
 CONFIG=ExtractionConfig(max_frames=10,candidates_per_segment=3,min_sharpness=15)
 
@@ -50,6 +52,20 @@ def read_release(manifest, expected_sha=RELEASE_SHA256):
     return rows
 
 
+def compatible_preparation_state(old, current):
+    if old==current:return True
+    if (old.get('extract_code_sha256')!=SEEK_EQUIVALENT_LEGACY_EXTRACT_SHA256
+        or old.get('prepare_code_sha256')!=SEEK_MIGRATION_LEGACY_PREPARE_SHA256):return False
+    previous=dict(old);candidate=dict(current)
+    for key in ('extract_code_sha256','prepare_code_sha256'):
+        previous.pop(key,None);candidate.pop(key,None)
+    previous_video=dict(previous.get('video',{}));candidate_video=dict(candidate.get('video',{}))
+    if 'inference_batch_size' not in previous_video and candidate_video.get('inference_batch_size')==3:
+        candidate_video.pop('inference_batch_size')
+        candidate['video']=candidate_video
+    return previous==candidate
+
+
 def sample_rows(rows):
     """Bounded FF++, Celeb-DF and DF40 sample, never written into the release."""
     chosen=[]
@@ -79,7 +95,8 @@ def run(manifest, output, *, expected_sha=RELEASE_SHA256, smoke=False, detector=
                'extract_code_sha256':file_sha256(Path(__file__).with_name('extract.py')),'stills_code_sha256':file_sha256(Path(__file__).with_name('process_stills.py'))}
     state=internal/'config.json'
     if state.exists():
-        if json.loads(state.read_text(encoding='utf-8'))!=signature:raise ValueError('Incompatible preparation configuration; select a new output directory')
+        old=json.loads(state.read_text(encoding='utf-8'))
+        if not compatible_preparation_state(old,signature):raise ValueError('Incompatible preparation configuration; select a new output directory')
     else:
         if any((output/part).exists() for part in PARTS):raise ValueError('Unmanaged output directory already contains partition folders')
         atomic_json(state,signature)

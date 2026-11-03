@@ -2,7 +2,7 @@ import json
 import shutil
 import numpy as np
 import pytest
-from deepfake_data.extract import ExtractionConfig, best_candidate, candidate_segments, evaluate_candidate, extract_video, square_crop, square_geometry
+from deepfake_data.extract import ExtractionConfig, best_candidate, candidate_segments, evaluate_candidate, extract_video, read_candidate_frames, square_crop, square_geometry
 
 
 def test_square_geometry_and_boundary_padding():
@@ -22,6 +22,40 @@ def test_segments_and_ranking_are_deterministic():
     assert all(all(i//25==s for i in indices) for s,indices in enumerate(segments))
     candidates=[({"reason":"eligible","score":2,"frame_index":8},None),({"reason":"eligible","score":2,"frame_index":3},None)]
     assert best_candidate(candidates)[0]["frame_index"]==3
+
+
+def test_candidate_frames_use_one_seek_per_segment_and_keep_indices():
+    class SequentialCapture:
+        def __init__(self):self.cursor=0;self.seeks=0;self.grabs=0
+        def set(self,prop,index):self.cursor=index;self.seeks+=1
+        def grab(self):self.cursor+=1;self.grabs+=1;return True
+        def read(self):
+            value=self.cursor;self.cursor+=1
+            return True,np.full((1,1,3),value,dtype=np.uint8)
+    capture=SequentialCapture();frames=read_candidate_frames(capture,[5,8,11])
+    assert [x[0] for x in frames]==[5,8,11]
+    assert [int(x[2][0,0,0]) for x in frames]==[5,8,11]
+    assert capture.seeks==1 and capture.grabs==4
+
+
+def test_bounded_batch_inference_preserves_temporal_selection(tmp_path,monkeypatch):
+    import cv2
+    import deepfake_data.extract as module
+    video=tmp_path/'batch.mp4';video.write_bytes(b'video');monkeypatch.setattr(cv2,'VideoCapture',type('Capture',(object,),{'__init__':lambda self,*a:setattr(self,'index',0),'isOpened':lambda self:True,'get':lambda self,p:6,'set':lambda self,p,v:setattr(self,'index',v),'grab':lambda self:(setattr(self,'index',self.index+1) or True),'read':lambda self:(True,np.tile((np.indices((160,160)).sum(axis=0)%2)[:,:,None],(1,1,3)).astype(np.uint8)),'release':lambda self:None}))
+    monkeypatch.setattr(module,'_write_image',lambda path,image:path.write_bytes(b'png'))
+    monkeypatch.setattr(module.os,'replace',lambda src,dst:shutil.copyfile(src,dst))
+    class Detector:
+        def __init__(self):self.batch_sizes=[]
+        def detect(self,images,landmarks=True):
+            assert isinstance(images,list);self.batch_sizes.append(len(images))
+            boxes=[np.array([[20,20,120,120]],dtype=float) for _ in images]
+            probs=[np.array([.99]) for _ in images]
+            points=[None for _ in images]
+            return boxes,probs,points
+    detector=Detector();cfg=ExtractionConfig(max_frames=2,candidates_per_segment=3,min_sharpness=0,inference_batch_size=3)
+    result=extract_video(video,tmp_path/'batch-out',detector,config=cfg)
+    assert detector.batch_sizes==[3,3]
+    assert [x['frame_index'] for x in result['frames']]==[0,3]
 
 
 def test_confidence_and_size_rejection():
@@ -71,6 +105,11 @@ def test_resume_configuration_provenance_and_zero_yield(tmp_path,monkeypatch):
     detector=Detector();result=extract_video(video,tmp_path/"output",detector,config=config,provenance=provenance)
     assert detector.calls==[1,2] and len(result["frames"])==3
     assert result["config"]["provenance"]==provenance
+    legacy=json.loads((tmp_path/'output'/'state.json').read_text());legacy['parameters'].pop('inference_batch_size')
+    (tmp_path/'output'/'state.json').write_text(json.dumps(legacy))
+    complete=json.loads((tmp_path/'output'/'complete.json').read_text());complete['config']['parameters'].pop('inference_batch_size')
+    (tmp_path/'output'/'complete.json').write_text(json.dumps(complete))
+    assert extract_video(video,tmp_path/'output',Detector(fail=True),config=config,provenance=provenance)['frames']==result['frames']
     with pytest.raises(ValueError):extract_video(video,tmp_path/"output",detector,config=ExtractionConfig(max_frames=3,candidates_per_segment=1,margin=2),provenance=provenance)
     empty=extract_video(video,tmp_path/"empty",Detector(empty=True),config=config)
     assert empty["zero_yield"] and empty["rejection_counts"]["no_face"]==3

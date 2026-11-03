@@ -10,7 +10,7 @@ def main():
     parser.add_argument('--smoke',action='store_true',help='Process only one source from each dataset into artifacts/diagnostics')
     args=parser.parse_args()
     root=Path(__file__).resolve().parents[1]
-    output=root/('artifacts/diagnostics/prepare-smoke-v6' if args.smoke else 'data/processed/xception-v1')
+    output=root/('artifacts/diagnostics/prepare-smoke-v7' if args.smoke else 'data/processed/xception-v1')
     config=ExtractionConfig(max_frames=2,candidates_per_segment=2,min_sharpness=15) if args.smoke else CONFIG
     run(root/'artifacts/combined/releases/best-effort-v1.csv',output,smoke=args.smoke,config=config)
 
