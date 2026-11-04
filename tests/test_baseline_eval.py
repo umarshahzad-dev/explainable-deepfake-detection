@@ -7,6 +7,7 @@ import pytest
 
 from deepfake_data.baseline_eval import (
     average_binary_probabilities,
+    build_common_support_comparison,
     calibrate_real_probabilities,
     calculate_metrics,
     load_prior_training,
@@ -204,6 +205,12 @@ def test_metrics_use_fake_zero_as_positive_class():
     assert result["false_positive_rate"] == pytest.approx(0.5)
     assert result["false_negative_rate"] == pytest.approx(0.5)
     assert result["confusion_matrix_true_fake_real_pred_fake_real"] == [[1, 1], [1, 1]]
+    assert result["roc_auc_fake"] == pytest.approx(0.5)
+
+
+def test_roc_auc_uses_average_ranks_for_tied_scores():
+    result = calculate_metrics([0, 1], [0.5, 0.5], threshold=0.5)
+    assert result["roc_auc_fake"] == pytest.approx(0.5)
 
 
 def test_legacy_horizontal_flip_averaging_returns_probability_not_sum():
@@ -270,4 +277,62 @@ def test_model_real_scores_are_inverted_for_fake_zero_class_metrics():
 def test_identity_calibration_rejects_non_probabilities(scores):
     with pytest.raises(ValueError, match="finite one-dimensional probabilities"):
         calibrate_real_probabilities(scores, {"method": "none"}, lambda *_: None)
+
+
+def test_common_support_recalculates_metrics_on_intersection_and_keeps_failures_separate():
+    selection = [
+        {"evaluation_id": "a", "label": "0", "method": "DiT"},
+        {"evaluation_id": "b", "label": "1", "method": "HeyGen"},
+        {"evaluation_id": "c", "label": "0", "method": "MRAA"},
+        {"evaluation_id": "d", "label": "1", "method": "HeyGen"},
+        {"evaluation_id": "e", "label": "0", "method": "DiT"},
+    ]
+
+    def pred(evaluation_id, label, real_probability, fake_probability):
+        return {
+            "evaluation_id": evaluation_id,
+            "label": label,
+            "real_probability_raw": real_probability,
+            "fake_probability_scored": fake_probability,
+        }
+
+    report = {
+        "status": "failed_common_image_support",
+        "models": [
+            {
+                "name": "clean", "checkpoint_sha256": "clean-hash",
+                "preprocessing": {"contract": "clean"},
+                "saved_calibration_operating_point": {"threshold": 0.8, "calibration_method": "temperature"},
+                "predictions": [pred("a", 0, .1, .9), pred("b", 1, .9, .1), pred("c", 0, .7, .3), pred("d", 1, .3, .7)],
+                "failures": [{"evaluation_id": "e", "reason": "no face"}],
+            },
+            {
+                "name": "mixed", "checkpoint_sha256": "mixed-hash",
+                "preprocessing": {"contract": "mixed"},
+                "saved_calibration_operating_point": {"threshold": 0.7, "calibration_method": "platt"},
+                "predictions": [pred("a", 0, .2, .8), pred("b", 1, .8, .2), pred("c", 0, .4, .6), pred("e", 0, .3, .7)],
+                "failures": [{"evaluation_id": "d", "reason": "decode failure"}],
+            },
+            {
+                "name": "focal", "checkpoint_sha256": "focal-hash",
+                "preprocessing": {"contract": "focal"},
+                "saved_calibration_operating_point": {"threshold": 0.5, "calibration_method": "none"},
+                "predictions": [pred("a", 0, .15, .85), pred("b", 1, .85, .15), pred("c", 0, .45, .55), pred("d", 1, .3, .7), pred("e", 0, .2, .8)],
+                "failures": [],
+            },
+        ],
+    }
+    result = build_common_support_comparison(report, selection)
+
+    assert result["common_successful_images"] == 3
+    assert result["common_evaluation_ids"] == ["a", "b", "c"]
+    assert result["common_class_counts"] == {"fake_0": 2, "real_1": 1}
+    assert [model["common_support_images"] for model in result["models"]] == [3, 3, 3]
+    assert all(model["fixed_raw_fake_score_threshold_0_5"]["samples"] == 3 for model in result["models"])
+    assert all(model["saved_calibration_operating_point"]["metrics"]["samples"] == 3 for model in result["models"])
+    assert result["models"][0]["fixed_raw_fake_score_threshold_0_5"]["confusion_matrix_true_fake_real_pred_fake_real"] == [[1, 1], [0, 1]]
+    assert result["models"][1]["failed_images_in_original_report"] == [{"evaluation_id": "d", "reason": "decode failure"}]
+    assert {row["evaluation_id"] for row in result["excluded_from_common_support"]} == {"d", "e"}
+    assert result["source_comparison_status"] == "failed_common_image_support"
+    assert report["status"] == "failed_common_image_support"  # source report was not mutated
 

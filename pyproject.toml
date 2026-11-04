@@ -21,7 +21,10 @@ deepfake-extract = "deepfake_data.extract:main"
 deepfake-inspect = "deepfake_data.inspect_media:main"
 deepfake-gif = "deepfake_data.gif_frames:main"
 deepfake-training-manifest = "deepfake_data.training_manifest:main"
+deepfake-prepare-training = "deepfake_data.prepare_training:main"
+deepfake-training-smoke = "deepfake_data.training_smoke:main"
 deepfake-baseline-eval = "deepfake_data.baseline_eval:main"
+deepfake-finalize-v2-allocation = "deepfake_data.finalize_v2:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

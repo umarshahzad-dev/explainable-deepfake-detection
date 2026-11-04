@@ -451,11 +451,7 @@ def calculate_metrics(labels: Sequence[int], fake_scores: Sequence[float], thres
     fake_recall = tp / (tp + fn) if tp + fn else 0.0
     real_recall = tn / (tn + fp) if tn + fp else 0.0
     precision = tp / (tp + fp) if tp + fp else 0.0
-    try:
-        from sklearn.metrics import roc_auc_score
-        auc = float(roc_auc_score(y_fake, fake_scores)) if len(set(y_fake)) == 2 else None
-    except ImportError:
-        auc = None
+    auc = _binary_roc_auc(y_fake, fake_scores) if len(set(y_fake)) == 2 else None
     return {
         "threshold_fake_score": threshold,
         "samples": len(labels),
@@ -469,6 +465,196 @@ def calculate_metrics(labels: Sequence[int], fake_scores: Sequence[float], thres
         "false_negative_rate": fn / (fn + tp) if fn + tp else 0.0,
         "confusion_matrix_true_fake_real_pred_fake_real": [[tp, fn], [fp, tn]],
     }
+
+
+def _binary_roc_auc(positive_labels: Sequence[int], scores: Sequence[float]) -> float:
+    """Compute ROC-AUC with average ranks for ties (positive label is 1)."""
+    if len(positive_labels) != len(scores) or not positive_labels:
+        raise ValueError("ROC-AUC requires equally sized, nonempty labels and scores")
+    positives = sum(int(label == 1) for label in positive_labels)
+    negatives = len(positive_labels) - positives
+    if not positives or not negatives:
+        raise ValueError("ROC-AUC requires both positive and negative labels")
+    ordered = sorted(zip(scores, positive_labels), key=lambda pair: pair[0])
+    positive_rank_sum = 0.0
+    start = 0
+    while start < len(ordered):
+        end = start + 1
+        while end < len(ordered) and ordered[end][0] == ordered[start][0]:
+            end += 1
+        average_rank = ((start + 1) + end) / 2.0
+        positive_rank_sum += average_rank * sum(int(label == 1) for _, label in ordered[start:end])
+        start = end
+    return (positive_rank_sum - positives * (positives + 1) / 2.0) / (positives * negatives)
+
+
+def build_common_support_comparison(
+    comparison: Mapping[str, Any], selection_rows: Sequence[Mapping[str, str]]
+) -> dict[str, Any]:
+    """Recompute checkpoint metrics on the intersection of saved predictions.
+
+    Failed preprocessing remains visible per model and does not enter any metric.
+    This function performs no inference and never mutates the input evaluation.
+    """
+    selection_by_id: dict[str, Mapping[str, str]] = {}
+    for row in selection_rows:
+        evaluation_id = str(row.get("evaluation_id", ""))
+        if not evaluation_id or evaluation_id in selection_by_id:
+            raise ValueError("Selection must contain unique, nonempty evaluation IDs")
+        if row.get("label") not in {"0", "1"}:
+            raise ValueError(f"Unresolved label in selection: {evaluation_id}")
+        selection_by_id[evaluation_id] = row
+    if len(selection_by_id) == 0:
+        raise ValueError("Selection is empty")
+
+    models = comparison.get("models")
+    if not isinstance(models, list) or len(models) < 2:
+        raise ValueError("Comparison report must contain at least two model results")
+    model_names = [str(model.get("name", "")) for model in models]
+    if any(not name for name in model_names) or len(model_names) != len(set(model_names)):
+        raise ValueError("Comparison model names must be nonempty and unique")
+    prediction_maps: list[dict[str, Mapping[str, Any]]] = []
+    failures_by_model: dict[str, list[dict[str, Any]]] = {}
+    for model in models:
+        name = str(model.get("name", ""))
+        if not name:
+            raise ValueError("Model result is missing its name")
+        predictions = model.get("predictions", [])
+        prediction_map: dict[str, Mapping[str, Any]] = {}
+        for prediction in predictions:
+            evaluation_id = str(prediction.get("evaluation_id", ""))
+            if not evaluation_id or evaluation_id in prediction_map:
+                raise ValueError(f"{name} predictions contain duplicate or empty evaluation IDs")
+            if evaluation_id not in selection_by_id:
+                raise ValueError(f"{name} prediction is absent from the selection: {evaluation_id}")
+            if int(prediction.get("label", -1)) != int(selection_by_id[evaluation_id]["label"]):
+                raise ValueError(f"Label mismatch for {evaluation_id} in {name} predictions")
+            prediction_map[evaluation_id] = prediction
+        prediction_maps.append(prediction_map)
+        failures_by_model[name] = list(model.get("failures", []))
+
+    common_ids = set(selection_by_id)
+    for prediction_map in prediction_maps:
+        common_ids.intersection_update(prediction_map)
+    ordered_common_ids = [key for key in selection_by_id if key in common_ids]
+    labels = [int(selection_by_id[key]["label"]) for key in ordered_common_ids]
+    if len(set(labels)) != 2:
+        raise ValueError("Common successful-image intersection must contain both verified classes")
+
+    model_results: list[dict[str, Any]] = []
+    for model, prediction_map in zip(models, prediction_maps):
+        name = str(model["name"])
+        common_predictions = [prediction_map[key] for key in ordered_common_ids]
+        raw_real = [float(item["real_probability_raw"]) for item in common_predictions]
+        scored_fake = [float(item["fake_probability_scored"]) for item in common_predictions]
+        raw_fake = real_to_fake_probabilities(raw_real)
+        native_record = model.get("saved_calibration_operating_point", {})
+        native_threshold = float(native_record.get("threshold", 0.5))
+        native_method = str(native_record.get("calibration_method", "none"))
+        fixed_metrics = calculate_metrics(labels, raw_fake, 0.5)
+        native_metrics = calculate_metrics(labels, scored_fake, native_threshold)
+
+        # Compare the stated fake-score orientation with the reverse as a
+        # diagnostic only. The model contract and old training code remain the
+        # authority; we do not select or alter an orientation based on test data.
+        reverse_orientation = calculate_metrics(labels, raw_real, 0.5)
+        method_fake_counts: Counter[str] = Counter()
+        method_fake_hits: Counter[str] = Counter()
+        for key, score in zip(ordered_common_ids, scored_fake):
+            row = selection_by_id[key]
+            if int(row["label"]) == 0:
+                method = str(row.get("method", "unknown"))
+                method_fake_counts[method] += 1
+                method_fake_hits[method] += int(score >= native_threshold)
+        method_recall = {
+            method: {"fake_count": count, "fake_recall": method_fake_hits[method] / count}
+            for method, count in sorted(method_fake_counts.items())
+        }
+        model_results.append({
+            "name": name,
+            "checkpoint_sha256": model.get("checkpoint_sha256"),
+            "preprocessing": model.get("preprocessing", {}),
+            "successful_images_in_original_report": len(prediction_map),
+            "failed_images_in_original_report": failures_by_model[name],
+            "common_support_images": len(ordered_common_ids),
+            "fixed_raw_fake_score_threshold_0_5": fixed_metrics,
+            "saved_calibration_operating_point": {
+                "threshold_fake_score": native_threshold,
+                "calibration_method": native_method,
+                "metrics": native_metrics,
+            },
+            "orientation_diagnostic": {
+                "contract": "raw model sigmoid output is real probability; fake score is 1 - real probability; fake label 0 is the positive class",
+                "correct_orientation_roc_auc_fake": fixed_metrics["roc_auc_fake"],
+                "reversed_orientation_roc_auc_fake_diagnostic_only": reverse_orientation["roc_auc_fake"],
+                "note": "The reversed score is diagnostic only and was not used to select model behavior.",
+            },
+            "per_method_fake_recall_at_native_threshold": method_recall,
+        })
+
+    excluded = []
+    for evaluation_id, row in selection_by_id.items():
+        if evaluation_id in common_ids:
+            continue
+        model_failures = {}
+        for model, prediction_map in zip(models, prediction_maps):
+            name = str(model["name"])
+            matching = [item for item in failures_by_model[name] if item.get("evaluation_id") == evaluation_id]
+            model_failures[name] = {
+                "status": "failed_preprocessing",
+                "failures": matching,
+            } if matching else {"status": "scored_but_not_common" if evaluation_id in prediction_map else "not_scored_no_failure_record", "failures": []}
+        excluded.append({"evaluation_id": evaluation_id, "label": int(row["label"]), "method": row.get("method"), "models": model_failures})
+
+    common_payload = "\n".join(ordered_common_ids).encode("utf-8")
+    label_counts = Counter(labels)
+    return {
+        "status": "common_support_metrics_recomputed",
+        "protocol": "df40-baseline-common-support-v1",
+        "source_comparison_status": comparison.get("status"),
+        "original_selected_images": len(selection_by_id),
+        "common_successful_images": len(ordered_common_ids),
+        "common_class_counts": {"fake_0": label_counts[0], "real_1": label_counts[1]},
+        "label_map": {"0": "fake", "1": "real"},
+        "common_evaluation_ids": ordered_common_ids,
+        "common_evaluation_ids_sha256": hashlib.sha256(common_payload).hexdigest(),
+        "excluded_from_common_support": excluded,
+        "models": model_results,
+        "focal_score_and_preprocessing_review": {
+            "score_orientation": "The prior focal serving code interprets sigmoid(output) as real probability and predicts real above 0.5; sorted ImageFolder class directories are fake then real. The evaluator's fake score = 1 - raw real probability therefore matches the documented label order.",
+            "common_support_orientation_auc": {
+                "correct_fake_score_orientation": next((m["orientation_diagnostic"]["correct_orientation_roc_auc_fake"] for m in model_results if m["name"] == "focal"), None),
+                "reversed_orientation_diagnostic_only": next((m["orientation_diagnostic"]["reversed_orientation_roc_auc_fake_diagnostic_only"] for m in model_results if m["name"] == "focal"), None),
+            },
+            "preprocessing_evidence": "The evaluator follows the old dataset extraction path: MTCNN post_process=False/min_face_size=50, 1.3x square crop with black boundary padding, OpenCV linear resize to 299, JPEG quality 95 round-trip, RGB normalization to 0.5, and horizontal-flip probability averaging. The old Streamlit serving path instead used default MTCNN settings and a rectangular +/-20px box expansion before Resize(299), so that serving path is not identical.",
+            "conclusion": "The common-set AUC is higher under the documented correct orientation than under reversed orientation, so score inversion is not a plausible explanation for focal's weak result. A preprocessing mismatch remains possible because the focal checkpoint has no linked training manifest/config, and the historical serving path differs from the crop-training path. The evaluation behavior was not altered to improve scores.",
+        },
+        "limitations": [
+            "All reported checkpoint metrics use exactly the same saved-prediction intersection; preprocessing failures are reported separately and are not counted as predictions.",
+            "The comparison is an exploratory custom DF40 holdout, not an official DF40 benchmark or proof of person-identity independence.",
+            "The focal checkpoint lacks a recoverable training manifest, and its legacy preprocessing differs from the other checkpoints.",
+            "Orientation AUC diagnostics do not establish the best orientation and were not used to change scoring.",
+        ],
+    }
+
+
+def write_common_support_report(
+    comparison_path: str | Path, selection_path: str | Path, output_path: str | Path
+) -> dict[str, Any]:
+    comparison = _json(comparison_path)
+    selection_rows = list(_read_csv(selection_path))
+    report = build_common_support_comparison(comparison, selection_rows)
+    report["input_sha256"] = {
+        "original_comparison_json": sha256_file(comparison_path),
+        "selection_csv": sha256_file(selection_path),
+    }
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    report["output_path"] = str(out.resolve())
+    temp = out.with_suffix(out.suffix + ".tmp")
+    temp.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    _commit_generated_temp(temp, out)
+    return report
 
 
 def _model_specs(previous_root: Path) -> list[dict[str, Any]]:
@@ -836,6 +1022,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     full.add_argument("--out-dir", type=Path, default=Path("artifacts/evaluations/df40-baseline-v1"))
     full.add_argument("--device", default="auto")
     full.add_argument("--batch-size", type=int, default=2)
+    common = sub.add_parser("common-support", help="recompute metrics on saved common predictions without GPU inference")
+    common.add_argument("--comparison", type=Path, default=Path("artifacts/evaluations/df40-baseline-v1-corrected-audit/comparison.json"))
+    common.add_argument("--selection", type=Path, default=Path("artifacts/evaluations/df40-baseline-v1-corrected-audit/selection.csv"))
+    common.add_argument("--output", type=Path, default=Path("artifacts/evaluations/df40-baseline-v1-corrected-audit/common-support-v1/report.json"))
     args = parser.parse_args(argv)
     if args.command == "select":
         records, report = select_evaluation_records(args.inventory, args.components, args.prior_manifest, seed=args.seed, fake_groups_per_method=args.fake_groups_per_method, real_groups_per_method=args.real_groups_per_method, hash_audit_path=args.hash_audit)
@@ -843,8 +1033,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(json.dumps({"selection":str(manifest),"report":str(report_path),"records":len(records),"labels":report["selected_labels"],"ready_for_smoke":report["status"]},indent=2))
     elif args.command == "smoke":
         print(json.dumps(run_smoke(args.selection,args.previous_root,args.output,device=args.device),indent=2))
-    else:
+    elif args.command == "evaluate":
         print(json.dumps(evaluate(args.selection,args.previous_root,args.out_dir,device=args.device,batch_size=args.batch_size),indent=2))
+    else:
+        result = write_common_support_report(args.comparison,args.selection,args.output)
+        print(json.dumps({
+            "status": result["status"],
+            "output": result["output_path"],
+            "common_images": result["common_successful_images"],
+            "class_counts": result["common_class_counts"],
+            "models": [{
+                "name": model["name"],
+                "raw_0_5": model["fixed_raw_fake_score_threshold_0_5"],
+                "native": model["saved_calibration_operating_point"],
+            } for model in result["models"]],
+        }, indent=2))
 
 
 if __name__ == "__main__":
