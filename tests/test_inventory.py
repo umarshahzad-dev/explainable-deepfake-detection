@@ -139,3 +139,94 @@ def test_select_validation_and_test_videos():
     rows=[{"project_partition":"val","media_type":"video"},{"project_partition":"test","media_type":"video"},{"project_partition":"test","media_type":"image"}]
     assert select_videos(rows,"val")==rows[:1]
     assert select_videos(rows,"test")==rows[1:2]
+
+
+def test_df40_heygen_whichisreal_and_midjourney_reconciliation(tmp_path):
+    config=tmp_path/"configs";config.mkdir()
+    extracted=tmp_path/"data/raw/df40/extracted"
+    files=[
+        "heygen/heygen_new/fake/frames/fake-clip/000.png",
+        "heygen/heygen_new/real/real-clip/000.png",
+        "whichfaceisreal/whichfaceisreal/fake/900.png",
+        "whichfaceisreal/whichfaceisreal/real/00219.jpeg",
+        "MidJourney/MidJourney/fake/prompt.gif",
+        "MidJourney/MidJourney/real/real.jpg",
+        "sadtalker/sadtalker/fake/kept-but-excluded.png",
+    ]
+    for rel in files:
+        path=extracted/rel;path.parent.mkdir(parents=True,exist_ok=True);path.touch()
+    (extracted/"heygen/heygen_new/fake/frames/fake-clip/landmarks.npy").touch()
+    (extracted/"heygen/heygen_new/fake/frames/fake-clip/._000.png").touch()
+    (extracted/"__MACOSX/heygen/heygen_new/fake/frames/fake-clip/000.png").parent.mkdir(parents=True,exist_ok=True)
+    (extracted/"__MACOSX/heygen/heygen_new/fake/frames/fake-clip/000.png").touch()
+    metadata=tmp_path/"data/raw/df40/metadata/dataset_json";metadata.mkdir(parents=True)
+
+    def record(label,partition,sample,frame):
+        return {sample:{"label":label,"frames":[f"deepfakes_detection_datasets/DF40/{frame}"]}}
+
+    heygen={"heygen":{
+        "heygen_Fake":{"test":record("heygen_Fake","test","fake-clip","heygen/fake/frames/fake-clip/000.png")},
+        "heygen_Real":{"test":record("heygen_Real","test","real-clip","heygen/real/real-clip/000.png")},
+    }}
+    (metadata/"heygen.json").write_text(json.dumps(heygen))
+
+    which_fake=record("whichisreal_Fake","test","900","whichisreal/fake/900.png")
+    which_real=record("whichisreal_Real","test","00219","whichisreal/real/00219.jpeg")
+    which={"whichisreal":{
+        "whichisreal_Fake":{"test":which_fake,"val":record("whichisreal_Fake","val","900","whichisreal/fake/900.png")},
+        "whichisreal_Real":{"test":which_real,"val":record("whichisreal_Real","val","00219","whichisreal/real/00219.jpeg")},
+    }}
+    (metadata/"whichisreal.json").write_text(json.dumps(which))
+    # Aggregate metadata must not be concatenated with the direct method file.
+    (metadata/"DF40_all.json").write_text(json.dumps(heygen))
+
+    mid_fake={"prompt.gif":{"label":"MidJourney_Fake","frames":["deepfakes_detection_datasets/DF40/MidJourney/fake/prompt.gif"]}}
+    mid_real={"real.jpg":{"label":"MidJourney_Real","frames":["deepfakes_detection_datasets/DF40/MidJourney/real/real.jpg"]}}
+    mid={"MidJourney":{
+        "MidJourney_Fake":{"test":mid_fake,"val":mid_fake},
+        "MidJourney_Real":{"test":mid_real,"val":mid_real},
+    }}
+    (metadata/"midjourney.json").write_text(json.dumps(mid))
+    datasets={"raw_root":"data/raw","output_dir":"artifacts/old","datasets":{"df40":{"path":"df40/extracted","metadata_path":"df40/metadata/dataset_json"}}}
+    cfg=config/"datasets.json";cfg.write_text(json.dumps(datasets))
+    manifest,report=generate(cfg,output_dir="artifacts/inventory/phase1-test")
+    with manifest.open(newline="",encoding="utf-8") as stream:
+        rows={row["relative_path"]:row for row in csv.DictReader(stream)}
+
+    fake=rows["heygen/heygen_new/fake/frames/fake-clip/000.png"]
+    real=rows["heygen/heygen_new/real/real-clip/000.png"]
+    assert fake["label"]=="0" and real["label"]=="1"
+    assert fake["group_id"]=="df40:heygen:unknown:fake-clip"
+    assert real["group_id"]=="df40:heygen:unknown:real-clip"
+    assert rows["whichfaceisreal/whichfaceisreal/fake/900.png"]["label"]=="0"
+    assert rows["whichfaceisreal/whichfaceisreal/real/00219.jpeg"]["label"]=="1"
+    assert rows["whichfaceisreal/whichfaceisreal/fake/900.png"]["group_id"]=="df40:whichfaceisreal:unknown:900"
+    mid=rows["MidJourney/MidJourney/fake/prompt.gif"]
+    assert mid["label"]=="0" and mid["metadata_status"]=="matched"
+    assert mid["original_partition"]=="test|val" and mid["project_partition"]==""
+    assert mid["group_id"]=="df40:MidJourney:unknown:prompt.gif"
+    assert rows["sadtalker/sadtalker/fake/kept-but-excluded.png"]["experiment_eligibility"]=="excluded_by_experiment_choice"
+    assert "heygen.json" in report["metadata_selected"] and "whichisreal.json" in report["metadata_selected"]
+    assert "DF40_all.json" not in report["metadata_selected"]
+    assert report["metadata_partition_overlap_keys"]==4
+    assert report["discovered_extensions"]["df40"][".npy"]==1
+    assert report["discovered_extensions"]["df40"][".png"]==6
+    assert report["apple_metadata_tree_files_excluded"]==1
+    assert report["apple_metadata_tree_extensions"]["df40"][".png"]==1
+    assert report["counts"]["indexed:df40"]==7
+    assert report["counts"]["label:df40:0"]==3
+    assert report["counts"]["label:df40:1"]==3
+    assert report["counts"]["label:df40:unknown"]==1
+    assert report["apple_metadata_files_excluded"]==1
+    assert sum(report["method_label_media_eligibility"].values())==7
+    assert report["method_label_media_eligibility"]["df40|heygen|0|image|eligible_labeled_record"]==1
+    assert report["method_label_media_eligibility"]["df40|sadtalker|unknown|image|excluded_by_experiment_choice"]==1
+    assert (manifest.parent/"report.md").is_file()
+    assert "Method, label, media type, eligibility" in (manifest.parent/"report.md").read_text()
+
+
+def test_metadata_file_alias_for_whichfaceisreal(tmp_path):
+    from deepfake_data.inventory import metadata_files
+    (tmp_path/"whichisreal.json").touch()
+    (tmp_path/"DF40_all.json").touch()
+    assert [p.name for p in metadata_files(tmp_path,{"whichfaceisreal"})]==["whichisreal.json"]
