@@ -1,0 +1,239 @@
+{
+  "raw_root": "data/raw",
+  "weights": "weights/xception_imagenet.safetensors",
+  "official_splits": "data/splits/ffpp_official",
+  "identity_registry": null,
+  "identity_policy": "source-parent",
+  "seed": 42,
+  "preprocessing": {
+    "version": "square299_bicubic224_mtcnn50_v2",
+    "master_size": 299,
+    "margin_factor": 1.5,
+    "confidence": 0.95,
+    "min_face_size": 50,
+    "interpolation": "bicubic",
+    "max_pixels": 8000000,
+    "max_faces": 10,
+    "alignment": "landmark",
+    "detector": {
+      "image_size": 299,
+      "margin": 0,
+      "min_face_size": 50,
+      "thresholds": [
+        0.6,
+        0.7,
+        0.7
+      ],
+      "factor": 0.709,
+      "post_process": false,
+      "select_largest": true,
+      "selection_method": "largest",
+      "keep_all": true
+    }
+  },
+  "model": {
+    "name": "legacy_xception.tf_in1k",
+    "input_size": 299,
+    "mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "std": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "class_map": {
+      "fake": 0,
+      "real": 1
+    },
+    "dropout": 0.35,
+    "use_cbam": true,
+    "cbam_reduction": 16,
+    "head_hidden": 512,
+    "classifier_dropout": 0.35,
+    "classifier_activation": "gelu",
+    "drop_path": 0.1,
+    "use_frequency": true,
+    "frequency_features": 128,
+    "use_se": false,
+    "use_eca": false,
+    "use_gabor": false,
+    "use_dual_stream": false,
+    "use_cross_attention": false,
+    "use_fpn": false,
+    "use_auxiliary_classifier": false,
+    "use_multi_head": false,
+    "use_attention_pooling": false,
+    "use_layernorm": false,
+    "use_weight_standardization": false,
+    "activation": "gelu"
+  },
+  "training": {
+    "batch_size": 4,
+    "accumulation": 8,
+    "workers": 4,
+    "pin_memory": true,
+    "amp": true,
+    "epoch_samples": 60000,
+    "head_epochs": 2,
+    "finetune_epochs": 18,
+    "head_lr": 0.001,
+    "backbone_lr": 2e-05,
+    "finetune_head_lr": 0.0003,
+    "weight_decay": 0.0005,
+    "min_lr": 1e-07,
+    "warmup_epochs": 3,
+    "patience": 8,
+    "clip_norm": 1.0,
+    "loss": "label_smoothing_bce",
+    "label_smoothing": 0.05,
+    "focal_alpha": 0.25,
+    "focal_gamma": 2.0,
+    "freeze_bn": true,
+    "augmentation": "robust_v2",
+    "mixup_alpha": 0.2,
+    "cutmix_alpha": 0.0,
+    "fouriermix_prob": 0.3,
+    "coarse_dropout_prob": 0.15,
+    "gaussian_noise_std": 0.02,
+    "jpeg_quality_range": [
+      30,
+      100
+    ],
+    "rotation_range": 10,
+    "hue_jitter": 0.05,
+    "saturation_jitter": 0.15,
+    "gamma_range": [
+      0.8,
+      1.2
+    ],
+    "blur_sigma_range": [
+      0.1,
+      1.5
+    ],
+    "rescale_range": [
+      0.5,
+      1.0
+    ],
+    "random_erase_prob": 0.1,
+    "grayscale_prob": 0.05,
+    "sharpen_prob": 0.15,
+    "perspective_prob": 0.1,
+    "elastic_prob": 0.0,
+    "motion_blur_prob": 0.05,
+    "randaugment": false,
+    "trivialaugment": false,
+    "augmix": false,
+    "style_transfer": false,
+    "artifact_injection": false,
+    "ema_decay": 0.999,
+    "use_ema": true,
+    "use_swa": true,
+    "swa_start_epoch": 15,
+    "use_gradient_noise": false,
+    "gradient_noise_std": 0.01,
+    "unfreeze_schedule": "gradual",
+    "layer_lr_decay": 0.85,
+    "optimizer": "adamw",
+    "optimizer_betas": [
+      0.9,
+      0.999
+    ],
+    "optimizer_eps": 1e-08,
+    "momentum": 0.9,
+    "scheduler": "cosine",
+    "scheduler_warm_restarts": false,
+    "scheduler_cycle_length": 10,
+    "use_sam": false,
+    "use_lookahead": false,
+    "use_lion": false,
+    "use_swa_final_bn_update": true,
+    "auxiliary_loss_weight": 0.1,
+    "consistency_loss_weight": 0.0,
+    "domain_adaptation_weight": 0.0,
+    "frequency_loss_weight": 0.0,
+    "supcon_temperature": 0.1,
+    "mixup_aware_loss": true
+  },
+  "extraction": {
+    "train_real": 50,
+    "train_fake": 10,
+    "eval_real": 15,
+    "eval_fake": 5,
+    "dfd_frames": 20,
+    "dfd_real_clips": 200,
+    "dfd_fake_clips": 200,
+    "retry_max_frames_in_memory": 8,
+    "retry_max_pixels_per_frame": 4000000,
+    "retry_frame_memory_budget_mb": 512,
+    "train_caps": {
+      "ffpp": 60000,
+      "celebdf": 40000
+    }
+  },
+  "inference": {
+    "tta_hflip": true,
+    "tta_vflip": true,
+    "tta_multi_crop": true,
+    "tta_multi_scale": [
+      224,
+      256,
+      299
+    ],
+    "tta_rotation": [
+      0,
+      5,
+      -5
+    ],
+    "tta_color_jitter": false,
+    "calibration_method": "platt",
+    "use_mc_dropout": false,
+    "mc_dropout_samples": 20,
+    "ensemble_weights": {
+      "xception": 0.7,
+      "b0": 0.3
+    },
+    "threshold_search": "max_fake_recall_at_5pct_fpr"
+  },
+  "pretraining": {
+    "source": "imagenet",
+    "vggface2_weights_path": null,
+    "ms1m_weights_path": null,
+    "webface_weights_path": null,
+    "progressive_resizing": false,
+    "pretrain_synthetic": false,
+    "knowledge_distillation": false,
+    "teacher_run": null
+  },
+  "domain_adaptation": {
+    "method": "none",
+    "grl_lambda": 0.1,
+    "mmd_kernel": "rbf",
+    "coral_weight": 0.0,
+    "few_shot_anchor_size": 50,
+    "test_time_adaptation": false
+  },
+  "evaluation": {
+    "compute_auc": true,
+    "compute_pr_auc": true,
+    "compute_ece": true,
+    "compute_brier": true,
+    "compute_recall_at_fpr": [
+      0.01,
+      0.05,
+      0.1
+    ],
+    "compute_cluster_ci": true,
+    "compute_per_method": true,
+    "compute_per_demographic": false,
+    "compute_adversarial": false,
+    "compute_fairness": false,
+    "save_failure_cases": true,
+    "compute_significance": true,
+    "save_learning_curves": true,
+    "save_roc_pr_reliability": true,
+    "save_confusion_matrix": true
+  }
+}

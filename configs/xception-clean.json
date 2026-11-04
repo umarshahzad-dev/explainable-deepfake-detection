@@ -1,0 +1,50 @@
+{
+  "raw_root": "data/raw",
+  "weights": "weights/xception_imagenet.safetensors",
+  "official_splits": "data/splits/ffpp_official",
+  "identity_policy": "source-parent",
+  "seed": 42,
+  "model": {
+    "name": "legacy_xception.tf_in1k",
+    "input_size": 299,
+    "mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "std": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "class_map": {
+      "fake": 0,
+      "real": 1
+    },
+    "dropout": 0.2
+  },
+  "training": {
+    "batch_size": 8,
+    "accumulation": 4,
+    "workers": 4,
+    "epoch_samples": 20000,
+    "head_epochs": 2,
+    "finetune_epochs": 10,
+    "head_lr": 0.001,
+    "backbone_lr": 0.0001,
+    "finetune_head_lr": 0.0003,
+    "weight_decay": 0.0001,
+    "warmup_epochs": 1,
+    "patience": 4,
+    "clip_norm": 1.0,
+    "loss": "bce",
+    "label_smoothing": 0.0,
+    "freeze_bn": true,
+    "augmentation": "robust",
+    "mixup_alpha": 0.0,
+    "fouriermix_prob": 0.0,
+    "drop_path": 0.0,
+    "use_ema": true,
+    "ema_decay": 0.999
+  }
+}

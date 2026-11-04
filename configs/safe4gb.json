@@ -1,0 +1,6 @@
+{
+  "training": {
+    "batch_size": 4,
+    "accumulation": 8
+  }
+}

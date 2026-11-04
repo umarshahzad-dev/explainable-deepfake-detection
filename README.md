@@ -1,104 +1,160 @@
-# Explainable Deepfake Detection â€” dataset foundation
+# Explainable Deepfake Detection System
 
-Labels are **0 = fake** and **1 = real**. DF40 samples come from the authors' testing-data release; training on them is an experiment, not an untouched official DF40 benchmark. Inventory and splits never move or modify raw media. Generated manifests, image outputs and logs belong outside Git.
+A local university research prototype for **still-image** face classification as FAKE or REAL. Its primary demonstration checkpoint is Xception Clean. The system includes face detection and cropping, calibrated inference, optional Grad-CAM attribution, a FastAPI service, and React and Streamlit clients. Existing research code also includes EfficientNet-B0 and auxiliary architectures.
 
-## Inventory and splits
+The class convention is `fake = 0`, `real = 1`. The run-managed binary model emits a real-class logit; inference converts it to calibrated real probability and defines fake score as its complement. A model score is not proof that media is authentic or manipulated. Grad-CAM shows regions that influenced the selected score; it is not a forgery mask.
 
-Python 3.11 is required. The inventory and splitter use the standard library. Paths are configured in `configs/datasets.json` and point to the central physical dataset roots. From the project root:
+## Current status
 
-```powershell
-.\.venv\Scripts\python.exe -m deepfake_data.inventory --limit-per-dataset 100
-# Path-only full scan; may take time and substantial memory:
-.\.venv\Scripts\python.exe -m deepfake_data.inventory
+- Seven restored run-managed models passed strict CPU checkpoint loading after migration to `models/`; their checkpoint SHA-256 values are unchanged. Six calibration references still match their model hashes.
+- The legacy Xception Focal checkpoint is preserved under `models/archive/xception_focal_legacy/`. It is architecture-loadable, but its class direction and preprocessing are unverified and it is disabled in ordinary inference.
+- The source includes image decoding, face detection, inference, calibration, Grad-CAM, API history, and two clients. Real-photo end-to-end inference has not been verified because no permissioned face image was provided.
+- Video upload and temporal video analysis are not implemented.
+- Historical evaluation metrics are documented internally, but several are not tied to a restorable run-bound prediction report; this README makes no accuracy claim.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  C[configs] --> T[tools CLI]
+  T --> D[src/deepfake_detection/data]
+  D --> X[training and evaluation]
+  M[models: local checkpoints] --> I[src/deepfake_detection/inference]
+  X --> R[runs: new experiment outputs]
+  I --> A[app/backend: FastAPI]
+  A --> U[app/frontend: React]
+  A --> S[app/streamlit_ui: Streamlit]
+  I --> G[Grad-CAM and aligned overlay]
 ```
 
-The command writes `artifacts/inventory/manifest.csv` and `report.json`. A limited scan cannot establish totals or unmatched metadata counts; a full scan does not decode media. Original JSON files are read, not changed. Image and GIF inspection can be run with `python -m deepfake_data.inspect_media MANIFEST --limit 20 --output artifacts/inspection.json`; a selected GIF can be converted with `python -m deepfake_data.gif_frames GIF --output artifacts/gif_frames --max-frames 10`. These commands require Pillow.
+The `src/deepfake_detection/` package contains reusable ML code and has no dependency on the user interfaces. FastAPI calls the shared inference engine. React and Streamlit call the API. Restored model artifacts are separate from new training outputs: `models/` stores the selected and archived local models; `runs/` remains the default destination for newly created experiments and service history.
 
-Generate relationship candidates for both holdouts, then review the CSV evidence. An unknown or suspected relationship is not proof of independence; set `reviewed_independent` only where documented evidence supports it. The review requires an evidence field.
+## Repository layout
 
-```powershell
-.\.venv\Scripts\python.exe -m deepfake_data.relationships artifacts/inventory/manifest.csv --holdout celebdf --output artifacts/reviews/celebdf.csv
-.\.venv\Scripts\python.exe -m deepfake_data.relationships artifacts/inventory/manifest.csv --holdout ffpp --output artifacts/reviews/ffpp.csv
-.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol experimental --seed 42 --output artifacts/splits/within.csv
-.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol experimental --holdout celebdf --reviews artifacts/reviews/celebdf.csv --output artifacts/splits/holdout-celebdf.csv
-.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol experimental --holdout ffpp --reviews artifacts/reviews/ffpp.csv --output artifacts/splits/holdout-ffpp.csv
+```text
+app/backend/                 FastAPI app and API-specific persistence
+app/frontend/                React/Vite still-image client
+app/streamlit_ui/            Streamlit still-image client
+src/deepfake_detection/
+  data/                       manifests, grouping, MTCNN and preprocessing
+  models/                     Xception/EfficientNet, loading and registry
+  training/                   trainer, optimizers, scheduling and checkpoints
+  evaluation/                 metrics, calibration, testing and Grad-CAM
+  inference/                  reusable still-image inference engine
+  common/                     configuration, paths, logging and utilities
+models/primary/xception_clean/ selected local demonstration model
+models/archive/               other preserved model artifacts
+configs/                      experiment recipes
+runs/                         new experiment outputs and local history database
+tools/                        workflow and comparison commands
+tests/                        Python unittest suite
+weights/                      optional local ImageNet initialization files
+data/, crops/                 local data only; not included in Git
+docs/                         internal review documents; excluded from Git
 ```
 
-Each split report includes class coverage and group/available-hash overlap checks. `--hash` hashes each file and can take a long time. Both classes in train and test are necessary, not sufficient, for a meaningful evaluation. The experimental within-dataset split is training-only because unreviewed training content could overlap evaluation. FF++ YouTube source groups follow the documented target/source filenames; DeepFakeDetection, Celeb-DF identities and cross-dataset relationships require further evidence. Identity-level safety is not established.
+## Requirements
 
-## Bounded face extraction and visual inspection
+- Windows 11 or another supported Python platform.
+- Python 3.11.
+- Dependencies declared in `requirements.txt` (PyTorch, torchvision, timm, facenet-pytorch, OpenCV, Pillow, FastAPI, scikit-learn and related utilities).
+- Node.js/npm for React.
+- Optional NVIDIA CUDA runtime compatible with the selected PyTorch build. CPU inference is supported but slower.
 
-Use the existing extraction environment; no new PyTorch download or package installation is needed. Set the project source path for the current PowerShell session:
+## Windows PowerShell setup
 
-```powershell
-$py = "D:\University\explainable-deepfake-detection-system\venv\Scripts\python.exe"
-$env:PYTHONPATH = "$PWD\src"
-& $py -c "import torch, cv2; from facenet_pytorch import MTCNN; print(torch.__version__, torch.cuda.is_available(), cv2.__version__)"
-# Run pytest from the project venv without installing packages into the extraction environment:
-& $py -c "import sys; sys.path.insert(0,'src'); sys.path.append(r'D:\University\explainable-deepfake-detection-system-v2\.venv\Lib\site-packages'); import pytest; raise SystemExit(pytest.main(['-q']))"
-```
-
-**Run this inspection first.** It uses four explicitly selected files, so a full inventory is not required. The marked difficult video had a blurred candidate in a previous smoke test; add other known difficult videos with `--difficult-video` or provide a manifest with `--manifest` to select across dataset/label buckets. Inspect `contact_sheet.jpg`, individual originals/crops and `quality_report.json` before a larger run.
+Run these from the project root. Select the correct PyTorch/torchvision wheel for your machine before installing the remaining requirements if CUDA is needed.
 
 ```powershell
-& $py -m deepfake_data.quality `
-  --difficult-video "D:\University\datasets\deepfake\celebdf\Celeb-DF-v2\Celeb-synthesis\id0_id16_0000.mp4" `
-  --video "D:\University\datasets\deepfake\celebdf\Celeb-DF-v2\Celeb-real\id0_0000.mp4" `
-  --video "D:\University\datasets\deepfake\ffpp\manipulated_sequences\Deepfakes\c23\videos\000_003.mp4" `
-  --video "D:\University\datasets\deepfake\ffpp\original_sequences\youtube\c23\videos\000.mp4" `
-  --output artifacts/quality-review --max-videos 4 --max-frames 2 --candidates-per-segment 2 --device cuda
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e . --no-deps
 ```
 
-The defaults use a square MTCNN-box crop, 1.5Ã— margin, 299Ã—299 output, confidence â‰¥0.95, source face â‰¥80Ã—80, sharpness â‰¥30, padding â‰¤35%, up to 20 temporal segments and three candidates per segment. Each segment selects at most one eligible frame using confidence, size, sharpness and padding. These thresholds and the ranking are engineering defaults, not validated optima. The deterministic face strategy selects the largest detection by default; `--face-strategy highest_confidence` and optional `--crop-mode aligned` are available. No identity tracking is performed, so the selected person can change in multi-face videos.
+Do not install a second large PyTorch build over a working environment without checking its version and CUDA compatibility first. The project copy's historical `venv/` is not portable; create a fresh environment using the commands above.
 
-After visual review and explicit approval, the following **bounded batch** processes at most 200 training videos and records a console log. The current `artifacts/splits/within.csv` may be only a preview: replace it with the reviewed, full split manifest intended for the experiment. Check free disk space before running and use a separate output directory from inspection.
+`.env.example` contains local defaults only, not secrets. PowerShell does not automatically load it. Set optional values in the active terminal when needed:
 
 ```powershell
-Get-PSDrive D | Select-Object Free
-New-Item -ItemType Directory -Force artifacts/logs | Out-Null
-& $py -m deepfake_data.extract --manifest artifacts/splits/within.csv --output artifacts/faces-xception `
-  --partition train --max-videos 200 --max-frames 20 --candidates-per-segment 3 --device cuda 2>&1 |
-  Tee-Object -FilePath artifacts/logs/extraction.log -Append
+$env:DEEPFAKE_MODEL_ID = "xception-clean"
+$env:DEEPFAKE_PORT = "8000"
+$env:VITE_API_BASE_URL = "http://127.0.0.1:8000"
 ```
 
-Repeat the exact command to resume. Per-video checkpoints record selected frames, rejected candidates, read errors, zero yield, source provenance, parameters and detector runtime. Changed settings or incompatible older crops are rejected; use a new output directory. Crops are written via temporary files and recorded only after completion. `--partition val` or `--partition test` selects those videos when a verified split exists. The run is sequential and bounded but its duration and storage use depend on the media and GPU.
+## Local model files
 
-After extraction, combine crops with eligible still images and previously converted GIF frames:
+Git excludes trained checkpoints, model artifacts, ImageNet weights, crops, raw data, and internal documentation. Obtain artifacts only from an authorized source. The primary model must be restored as a complete directory at:
+
+```text
+models/primary/xception_clean/
+```
+
+Keep `config.json`, `input_manifest.json`, `best_metadata.json`, the exact hash-named checkpoint referenced by that metadata, and the matching calibration pointer/version files together. The loader checks checkpoint integrity and preprocessing/model contracts. The registry ID is `xception-clean`. Optional verified archived run folders belong under their corresponding `models/archive/` directories. Focal is not available as a trusted classifier.
+
+Historical training metadata retain original run locations for provenance; those paths are not the current artifact locations.
+
+## Run the applications
+
+Start the backend on localhost:
 
 ```powershell
-& $py -m deepfake_data.training_manifest artifacts/splits/within.csv --faces artifacts/faces-xception --gif-frames artifacts/gif_frames --output artifacts/training/images.csv
+python -m tools.laptop_workflow serve --run xception-clean --port 8000
 ```
 
-The manifest builder reports legacy or incompatible video crop configurations instead of silently mixing them. Review that report, source relationships, split coverage, class balance and the crops before using an experiment. These outputs do not establish independent evaluation or training readiness.
+It exposes `/health`, `/analyze`, and `/history`. `create_app()` is an application factory rather than a module-level singleton, so use the CLI command above; it selects the registered model and binds the service to localhost. For deployment automation, the app factory can be invoked with Uvicorn's `--factory` option after a model deployment has been selected.
 
-## Full reconciliation and readiness gate
-
-A full scan is path-only, takes time and may use substantial disk-backed temporary storage. It does not decode all media. Preserve the generated report with its matching manifest. Finalization records original-partition conflicts, dimension counts and the manifest SHA-256. The detailed reconciliation command writes all local metadata issues and unmatched JSON records as CSVs.
+Start the React client in another terminal:
 
 ```powershell
-.\.venv\Scripts\python.exe -m deepfake_data.inventory
-.\.venv\Scripts\python.exe -m deepfake_data.finalize_inventory --manifest artifacts/inventory/manifest.csv --report artifacts/inventory/report.json
-.\.venv\Scripts\python.exe -m deepfake_data.reconcile_details --manifest artifacts/inventory/manifest.csv --output artifacts/reconciliation
-.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol strict --seed 42 --output artifacts/splits/within-full.csv
-.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol strict --holdout celebdf --output artifacts/splits/holdout-celebdf-full.csv
-.\.venv\Scripts\python.exe -m deepfake_data.split artifacts/inventory/manifest.csv --protocol strict --holdout ffpp --output artifacts/splits/holdout-ffpp-full.csv
-.\.venv\Scripts\python.exe -m deepfake_data.relationships artifacts/inventory/manifest.csv --holdout celebdf --output artifacts/reviews/celebdf-full.csv
-.\.venv\Scripts\python.exe -m deepfake_data.relationships artifacts/inventory/manifest.csv --holdout ffpp --output artifacts/reviews/ffpp-full.csv
+Set-Location approntend
+npm install
+npm test
+npm run dev
 ```
 
-Review relationship queues before passing any review file to `--reviews`; evidence is required. Regenerate a protocol after review. The full scan currently records DF40 original-partition conflicts, not a verified DF40 test partition.
-
-Run the gate using the existing extraction environment (set `$py` and `$env:PYTHONPATH` as above). It emits JSON and Markdown, verifies the inventory/split hash chain and distinguishes bounded extraction from training/evaluation readiness:
+Or start Streamlit from the project root:
 
 ```powershell
-& $py -m deepfake_data.readiness --manifest artifacts/splits/within-full.csv `
-  --split-report artifacts/splits/within-full.report.json --inventory-report artifacts/inventory/report.json `
-  --quality-dir artifacts/quality-review-verified --df40-samples artifacts/readiness/df40-samples.json `
-  --output-dir artifacts/faces-xception --batch-videos 200 --report artifacts/readiness/within-full.json
+python -m streamlit run app/streamlit_ui/streamlit_app.py
 ```
 
-A PASS for extraction is limited to the declared batch and evidence; it does not authorize a run or establish independent evaluation. A 200-video FF++ training batch, only after explicit approval, uses `artifacts/splits/within-full.csv` in the extraction command above. Repeat that exact command to resume. The minimum free-space threshold and uncompressed-size allowance are estimates; monitor disk usage and stop if needed.
+This is a localhost prototype without authentication or production hardening. Do not expose it to a public network.
 
-## Combined three-dataset experiment
+## Analyze a still image
 
-The current allocation is a blocked review draft, not an approved split. See [COMBINED-PIPELINE.md](COMBINED-PIPELINE.md) for source-link evidence, proposed quotas, bounded checks and the conditional future processing workflow.
+Use the React or Streamlit client to upload a permissioned JPEG/PNG, or call the API directly:
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/analyze?explain=true" `
+  -H "Content-Type: image/jpeg" `
+  --data-binary "@C:\path	o\permissioned-face.jpg"
+```
+
+The response includes detected faces and per-face scores. A failed face detection or unusable crop does not receive a real/fake verdict. No manipulation-method classifier is provided.
+
+## CLI and tests
+
+```powershell
+python -m tools.laptop_workflow --help
+python -m unittest discover -s tests -v
+Push-Location approntend
+npm test
+Pop-Location
+```
+
+Python tests use `unittest` fixtures and mocks. They do not validate full external datasets or replace a permissioned real-image/MTCNN/API test. No training command is run by importing the package.
+
+## Privacy and limitations
+
+- Analysis history is stored locally under `runs/service/history.sqlite3`; result records can include image previews and Grad-CAM overlays. Treat this database as private image-derived data.
+- Uploaded image processing is local by default. URL fetching is restricted to public HTTPS addresses, but local file upload is preferable for a classroom demonstration.
+- Model run manifests refer to source crops outside this clean copy. Model loading is verified; historical data-backed training is not reproducible from this repository alone.
+- Recorded source-group checks do not establish universal person-identity independence.
+- Real-image face detection, prediction, and visual heatmap alignment remain unverified here because no permissioned image was supplied.
+- No software license is declared. Dataset and checkpoint terms remain with their respective owners.
+
+## Technology
+
+Python 3.11, PyTorch, torchvision, timm, facenet-pytorch/MTCNN, OpenCV, Pillow, FastAPI, Streamlit, React, Vite, SQLite, and `unittest`.

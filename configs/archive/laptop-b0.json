@@ -1,0 +1,13 @@
+{
+  "raw_root": "data/raw",
+  "weights": "weights/efficientnet_b0.safetensors",
+  "official_splits": "data/splits/ffpp_official",
+  "identity_policy": "source-parent",
+  "seed": 42,
+  "training": {
+    "batch_size": 16,
+    "accumulation": 2,
+    "workers": 4,
+    "epoch_samples": 20000
+  }
+}

@@ -1,52 +1,46 @@
-﻿# Python
+# Python source caches and local environments
 __pycache__/
 *.py[cod]
+*$py.class
 .venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Environment and secrets
+venv/
+env/
 .env
 .env.*
 !.env.example
 
-# Node.js
-node_modules/
-dist/
-.next/
+# Internal project review and generated inventory artifacts
+/docs/
+/FullFolderStructure.csv
+/IMPROVEMENTS_CATALOG.json
 
-# Datasets and generated artifacts
-data/
-datasets/
+# Local datasets, crops, restored model artifacts, and experiment outputs
+/crops/
+/runs/
+/data/raw/
+/data/splits/
+/data/processed/
+/weights/
+/models/
+*.safetensors
 *.pt
 *.pth
 *.ckpt
-*.safetensors
-*.onnx
-*.h5
-*.zip
-*.mp4
-*.avi
 
-# ML outputs
-runs/
-checkpoints/
-outputs/
-logs/
-wandb/
-mlruns/
+# Credentials and local databases
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
 
-# Local inspection scripts and reports
-df40-structure.txt
-extract-df40.ps1
-
-# IDE and OS
-.vscode/
-.idea/
+# Operating-system files, logs, caches, and build outputs
 .DS_Store
 Thumbs.db
-
-# Generated dataset inventories
-artifacts/
-*.egg-info/
+*.log
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+/app/frontend/node_modules/
+/app/frontend/dist/
