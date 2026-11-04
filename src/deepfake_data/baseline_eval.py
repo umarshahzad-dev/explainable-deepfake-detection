@@ -78,6 +78,41 @@ def normalize_saved_calibration(record: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def calibrate_real_probabilities(
+    real_probabilities: Sequence[float],
+    calibration: Mapping[str, Any],
+    apply_calibration: Any,
+):
+    """Apply a saved real-probability calibrator, including explicit identity.
+
+    Model logits are converted with sigmoid (and, for focal, averaged in
+    probability space across horizontal flips) before reaching this function.
+    The previous project's calibrator validates and handles temperature,
+    Platt, isotonic, and median methods. Its explicit ``none`` case is absent,
+    so identity is handled here after validating the probability contract.
+    Unknown methods are still delegated and rejected by that implementation.
+    """
+    import numpy as np
+
+    probabilities = np.asarray(real_probabilities, dtype=float)
+    method = calibration.get("method", "temperature")
+    if method == "none":
+        if (
+            probabilities.ndim != 1
+            or not probabilities.size
+            or not np.isfinite(probabilities).all()
+            or ((probabilities < 0) | (probabilities > 1)).any()
+        ):
+            raise ValueError("Identity calibration requires finite one-dimensional probabilities")
+        return probabilities.copy()
+    return apply_calibration(probabilities, calibration)
+
+
+def real_to_fake_probabilities(real_probabilities: Sequence[float]) -> list[float]:
+    """Convert real-class probabilities to fake scores (labels: fake=0, real=1)."""
+    return [1.0 - float(value) for value in real_probabilities]
+
+
 def _tail_video_id(value: str) -> str:
     value = (value or "").replace("\\", "/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
     return Path(value).stem.casefold()
@@ -730,15 +765,11 @@ def evaluate(selection_path: str | Path, previous_root: str | Path, output_dir: 
         apply_calibration, _ = helpers
         # Saved refactored calibrators operate on real probabilities. Focal has no
         # saved calibration and remains raw at its documented 0.5 threshold.
-        if calibration.get("method"):
-            real_scores = apply_calibration(__import__('numpy').asarray(raw_real), calibration)
-            native_threshold = float(calibration.get("threshold",0.5))
-        else:
-            real_scores = raw_real
-            native_threshold = 0.5
-        fake_scores = [1-float(value) for value in real_scores]
+        real_scores = calibrate_real_probabilities(raw_real, calibration, apply_calibration)
+        native_threshold = float(calibration.get("threshold", 0.5))
+        fake_scores = real_to_fake_probabilities(real_scores)
         accepted_labels = [int(row["label"]) for row in accepted_rows]
-        universal_fake = [1-value for value in raw_real]
+        universal_fake = real_to_fake_probabilities(raw_real)
         fixed_metrics = calculate_metrics(accepted_labels, universal_fake, 0.5)
         native_metrics = calculate_metrics(accepted_labels, fake_scores, native_threshold)
         per_method: dict[str, Any] = {}

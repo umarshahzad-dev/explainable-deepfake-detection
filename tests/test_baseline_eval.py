@@ -7,11 +7,13 @@ import pytest
 
 from deepfake_data.baseline_eval import (
     average_binary_probabilities,
+    calibrate_real_probabilities,
     calculate_metrics,
     load_prior_training,
     legacy_face_indices,
     normalize_saved_calibration,
     prior_source_overlap,
+    real_to_fake_probabilities,
     select_evaluation_records,
     write_selection,
 )
@@ -220,4 +222,52 @@ def test_saved_calibration_without_method_uses_original_temperature_default():
     calibration = normalize_saved_calibration({"temperature": 2.3, "threshold": 0.75})
     assert calibration["method"] == "temperature"
     assert calibration["temperature"] == 2.3
+
+
+def test_none_calibration_is_identity_on_real_probabilities():
+    import numpy as np
+
+    scores = np.asarray([0.0, 0.2, 0.7, 1.0])
+    result = calibrate_real_probabilities(scores, {"method": "none"}, lambda *_: pytest.fail("identity must not call legacy calibrator"))
+    assert np.array_equal(result, scores)
+    assert result is not scores
+
+
+@pytest.mark.parametrize("method", ["temperature", "platt", "isotonic", "median"])
+def test_supported_calibration_methods_delegate_to_previous_implementation(method):
+    import numpy as np
+
+    seen = {}
+
+    def legacy_apply(probabilities, calibration):
+        seen["method"] = calibration["method"]
+        seen["probabilities"] = probabilities.copy()
+        return probabilities * 0 + 0.375
+
+    result = calibrate_real_probabilities([0.2, 0.8], {"method": method}, legacy_apply)
+    assert seen["method"] == method
+    assert np.array_equal(seen["probabilities"], np.asarray([0.2, 0.8]))
+    assert np.array_equal(result, np.asarray([0.375, 0.375]))
+
+
+def test_unknown_calibration_method_is_not_silently_identity():
+    def legacy_apply(_probabilities, calibration):
+        raise ValueError(f"Unknown calibration method: {calibration.get('method')}")
+
+    with pytest.raises(ValueError, match="Unknown calibration method: mystery"):
+        calibrate_real_probabilities([0.2, 0.8], {"method": "mystery"}, legacy_apply)
+
+
+def test_model_real_scores_are_inverted_for_fake_zero_class_metrics():
+    fake_scores = real_to_fake_probabilities([0.1, 0.9])
+    assert fake_scores == pytest.approx([0.9, 0.1])
+    metrics = calculate_metrics([0, 1], fake_scores, threshold=0.5)
+    assert metrics["accuracy"] == 1.0
+    assert metrics["recall_fake"] == 1.0
+
+
+@pytest.mark.parametrize("scores", [[-0.1, 0.4], [0.2, 1.1], [float("nan")], []])
+def test_identity_calibration_rejects_non_probabilities(scores):
+    with pytest.raises(ValueError, match="finite one-dimensional probabilities"):
+        calibrate_real_probabilities(scores, {"method": "none"}, lambda *_: None)
 
